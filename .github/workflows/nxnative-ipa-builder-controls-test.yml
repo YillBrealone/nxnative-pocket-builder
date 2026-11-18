@@ -117,7 +117,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: widmonstertony/nxnative
-          ref: 14b849fcb84002873c7055e17cddbd413d92e1e1
+          # Keep this renderer and its translator together, as in the main workflow.
+          ref: b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -1845,25 +1846,22 @@ jobs:
           PY
 
           # Experimental: per-game right-stick touch sensitivity in the in-game
-          # Controls menu. This leaves native touch, trackpad and physical pads alone.
+          # Controls menu, for both the Swift and legacy Objective-C menu layouts.
           python - <<'PY'
           from pathlib import Path
-
           pad = Path('dm/ios/Sources/DmGamepad.m')
           menu = Path('dm/ios/Sources/GameMenu.swift')
-          if not pad.is_file() or not menu.is_file():
-              raise SystemExit('Right-stick sensitivity: unsupported gamepad/menu layout; no IPA built')
+          if not pad.is_file():
+              raise SystemExit('Right-stick sensitivity: gamepad is missing; no IPA built')
           p = pad.read_text(encoding='utf-8')
-          s = menu.read_text(encoding='utf-8')
+          s = menu.read_text(encoding='utf-8') if menu.is_file() else None
           key = 'DmRightStickSensitivityPercent'
-          if key in p or key in s:
+          if key in p or (s is not None and key in s):
               raise SystemExit('Right-stick sensitivity: duplicate or already-patched source; review before building')
           marker = '    if (_trackpad) { ax[0] = _trackX; ax[1] = _trackY; if (_trackClick) btn |= 1ull << B_A; }'
           if p.count(marker) != 1:
               raise SystemExit('Right-stick sensitivity: expected one touch axis location')
-          # Scale only the virtual right stick. Clamp the resulting vector to
-          # the host stick range, preserving its direction; 100% is unchanged.
-          addition = '''    // Per-game virtual right-stick gain, separate from physical controller input.
+          addition = """    // Per-game virtual right-stick gain, separate from physical controller input.
               NSInteger dm_right_pct = [NSUserDefaults.standardUserDefaults integerForKey:@"DmRightStickSensitivityPercent"];
               if (dm_right_pct < 50 || dm_right_pct > 200) dm_right_pct = 100;
               if (dm_right_pct != 100) {
@@ -1873,12 +1871,13 @@ jobs:
                   if (dm_rmag > 32767.0) { dm_rx *= 32767.0 / dm_rmag; dm_ry *= 32767.0 / dm_rmag; }
                   ax[2] = (int32_t)lrint(dm_rx); ax[3] = (int32_t)lrint(dm_ry);
               }
-          '''
+          """
           p = p.replace(marker, addition + marker, 1)
-          anchor = '    other.append(UIAction(title: "More Settings & Cloud Saves…"'
-          if s.count(anchor) != 1:
-              raise SystemExit('Right-stick sensitivity: in-game Controls menu changed')
-          menu_code = '''    let rightStickSensitivity: [(String, Int)] = [("50%", 50), ("75%", 75), ("100% (Default)", 100), ("125%", 125), ("150%", 150), ("200%", 200)]
+          if s is not None:
+              anchor = '    other.append(UIAction(title: "More Settings & Cloud Saves…"'
+              if s.count(anchor) != 1:
+                  raise SystemExit('Right-stick sensitivity: Swift Controls menu changed')
+              menu_code = """    let rightStickSensitivity: [(String, Int)] = [("50%", 50), ("75%", 75), ("100% (Default)", 100), ("125%", 125), ("150%", 150), ("200%", 200)]
               let savedRightStickSensitivity = UserDefaults.standard.integer(forKey: "DmRightStickSensitivityPercent")
               let currentRightStickSensitivity = savedRightStickSensitivity == 0 ? 100 : savedRightStickSensitivity
               let rightStickActions: [UIMenuElement] = rightStickSensitivity.map { title, percent in
@@ -1887,10 +1886,32 @@ jobs:
                   }
               }
               controls.append(UIMenu(title: "Right Stick Sensitivity", options: .singleSelection, children: rightStickActions))
-          '''
-          s = s.replace(anchor, menu_code + anchor, 1)
+          """
+              s = s.replace(anchor, menu_code + anchor, 1)
+          else:
+              anchor = '    UIAction *openSheet = [UIAction actionWithTitle:@"More Settings & Cloud Saves…"'
+              if p.count(anchor) != 1 or p.count('    NSMutableArray<UIMenuElement *> *ctrlRows = [NSMutableArray array];') != 1:
+                  raise SystemExit('Right-stick sensitivity: legacy Controls menu changed')
+              menu_code = """    NSArray<NSNumber *> *dmRightValues = @[@50, @75, @100, @125, @150, @200];
+              NSInteger dmRightCurrent = [NSUserDefaults.standardUserDefaults integerForKey:@"DmRightStickSensitivityPercent"];
+              if (dmRightCurrent < 50 || dmRightCurrent > 200) dmRightCurrent = 100;
+              NSMutableArray<UIAction *> *dmRightActions = [NSMutableArray array];
+              for (NSNumber *number in dmRightValues) {
+                  NSInteger percent = number.integerValue;
+                  NSString *title = percent == 100 ? @"100% (Default)" : [NSString stringWithFormat:@"%ld%%", (long)percent];
+                  UIAction *action = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__kindof UIAction *act) {
+                      (void)act; [NSUserDefaults.standardUserDefaults setInteger:percent forKey:@"DmRightStickSensitivityPercent"];
+                  }];
+                  action.state = percent == dmRightCurrent ? UIMenuElementStateOn : UIMenuElementStateOff;
+                  [dmRightActions addObject:action];
+              }
+              [ctrlRows addObject:[UIMenu menuWithTitle:@"Right Stick Sensitivity" image:nil identifier:nil options:UIMenuOptionsSingleSelection children:dmRightActions]];
+
+          """
+              p = p.replace(anchor, menu_code + anchor, 1)
           pad.write_text(p, encoding='utf-8')
-          menu.write_text(s, encoding='utf-8')
+          if s is not None:
+              menu.write_text(s, encoding='utf-8')
           print('Per-game virtual right-stick sensitivity source patch applied; default 100%.')
           PY
 
@@ -2288,6 +2309,35 @@ jobs:
           fi
 
           python "$CHAIN_SCRIPT" --header
+
+          # Fail before extraction/compilation if this older-device engine expects
+          # a different legacy shader chain. Never relabel shader libraries.
+          if [[ "$CACHE_DEVICE" == *"BC fallback"* ]]; then
+            python - <<'PY'
+          from pathlib import Path
+          import re
+          packer = Path('dm/ios/tools/build_ipa.sh')
+          generated = Path('dm/gfx/nvn/dmsh_chain.h')
+          legacy = Path('dm/gfx/nvn/legacy/dmsh_chain.h')
+          def chain(path):
+              if not path.is_file():
+                  raise SystemExit(f'::error::Missing shader chain header: {path}')
+              hits = re.findall(r'^#define\s+DMSH_CHAIN\s+"([a-fA-F0-9]+)"\s*$', path.read_text(), re.M)
+              if len(hits) != 1:
+                  raise SystemExit(f'::error::Invalid shader chain header: {path}')
+              return hits[0]
+          if not packer.is_file():
+              raise SystemExit('::error::Missing iOS packer; cannot check shader compatibility')
+          current = chain(generated)
+          text = packer.read_text()
+          if 'gfx/nvn/legacy/dmsh_chain.h' in text:
+              expected = chain(legacy)
+              if current != expected:
+                  raise SystemExit(f'::error::Older-device shader chain mismatch before compilation: generated {current}, legacy renderer {expected}. Use a matching engine and translator; do not rename libraries.')
+          print(f'Older-device shader chain preflight passed: {current}. Resource and gameplay compatibility are not established.')
+          PY
+          fi
+
           CHAIN_ID="$(python - <<'PY'
           import re
           from pathlib import Path
@@ -2358,6 +2408,98 @@ jobs:
         with:
           path: ${{ runner.temp }}/nxnative-shader-cache
           key: nxnative-shaders-v2-${{ env.SHADER_CACHE_HASH }}
+
+      - name: Install guarded Final Fantasy disk-saving cleanup
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && inputs.device == 'iPhone 15 Pro/Pro Max or newer - NX2Apple Patched (Default)' && env.DETECTED_TITLE_ID == '0100606026F12000'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYTHON'
+          import hashlib
+          from pathlib import Path
+
+          path = Path('scripts/build_ipa_from_nsp.py')
+          text = path.read_text(encoding='utf-8')
+          # The main builder changes this one language default before this step.
+          normalized = text.replace("want_lang = language_code(lang_in) if lang_in else 'en-GB'", "want_lang = language_code(lang_in) if lang_in else 'en-US'")
+          audited = {
+              '030c713af1ca8c0dc9406b9a446dae555f44cc610f768b56ddaa6f16b31eb006',  # NX2 373930 / upstream 94a094
+              '22bbe2e2cad6701dfe1676f7d2c24081d64ab1dba9f696bb34b8f084ce4aacc6',  # NX2 4ab27a / upstream 94a094
+          }
+          if hashlib.sha256(normalized.encode('utf-8')).hexdigest() not in audited:
+              raise SystemExit('Disk-saving test: engine script differs from the audited revision; refusing the cleanup patch.')
+          anchor = '        seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None\n        ios = build_shaders(\n'
+          if text.count(anchor) != 1:
+              raise SystemExit('Disk-saving test: expected shader build location not found exactly once.')
+          addition = '''        # Disk-saving test: only this audited game and disposable runner copies.
+                  # All game versions and DLC have been extracted, and shader split completed.
+                  # Skip DLC, multi-program, non-NSP and seeded builds (not audited).
+                  if (app == 0x0100606026F12000 and not mac and not mac_pack
+                          and from_seed_arg is None and not nup and not dump
+                          and not fam.get('dlc') and not g.get('programs', '')
+                          and not PROGRAM_INDEX and getattr(args, 'in_programs', None) is None):
+                      package_root = Path(os.environ.get('RUNNER_TEMP', '')).resolve() / 'GameFiles'
+                      original_paths = [fam.get('base')] + [p for _, p in fam.get('updates', [])]
+                      candidates = list(dict.fromkeys(Path(p) for p in original_paths if p is not None))
+                      safe = (bool(os.environ.get('RUNNER_TEMP')) and nsp_dir.resolve() == package_root
+                              and fam.get('base') is not None and bool(candidates)
+                              and all(not p.is_symlink() and p.is_file() and p.suffix.lower() == '.nsp'
+                                      and p.parent.resolve() == package_root for p in candidates)
+                              and (game / 'ExeFS' / 'main').is_file()
+                              and Path(str(rfs.source(game))).is_file() and (sh / 'pkg').is_dir())
+                      if safe:
+                          before = shutil.disk_usage(package_root).free
+                          total = sum(p.stat().st_size for p in candidates)
+                          for p in candidates: p.unlink()
+                          after = shutil.disk_usage(package_root).free
+                          say(f'Disk-saving test: removed {len(candidates)} runner-local NSP copies ({total / 1e9:.2f} GB logical); free space {before / 1e9:.2f} -> {after / 1e9:.2f} GB. Extracted game and shaders kept.')
+                      else:
+                          say('Disk-saving test: safety checks did not match; package copies kept.')
+                  else:
+                      say('Disk-saving test: unsupported input combination; package copies kept.')
+          '''
+          text = text.replace(anchor, addition + anchor, 1)
+          # This second insertion is after build_shaders has returned successfully.
+          post_anchor = '    motion = MOTION if args.motion is None else args.motion\n'
+          if text.count(post_anchor) != 1:
+              raise SystemExit('Disk-saving test: post-shader cleanup location changed.')
+          post = '''    # Release the disposable compile database only after the entire iOS shader
+              # stage succeeds. Keep the finished iOS and Mac libraries and RomFS intact.
+              # CACHE_INPUT=false explicitly opts out of saving or restoring this database.
+              if (app == 0x0100606026F12000 and gfx == 'nvn' and not mac and not mac_pack
+                      and from_seed_arg is None and not nup and not dump and not fam.get('dlc')
+                      and not g.get('programs', '') and not PROGRAM_INDEX
+                      and getattr(args, 'in_programs', None) is None
+                      and os.environ.get('CACHE_INPUT', '').lower() == 'false'):
+                  rt = os.environ.get('RUNNER_TEMP', '')
+                  target_work = Path(rt).resolve() / 'GameFiles' / '0100606026F12000_build' if rt else None
+                  cache_dir = sh / 'cache'
+                  chain = chain_of(repo)
+                  expected = target_work / 'shader' / 'cache' if target_work else None
+                  ios_img = ios / f'b-{chain}.img'
+                  safe = (expected is not None and work.resolve() == target_work and sh.resolve() == target_work / 'shader'
+                          and not cache_dir.is_symlink() and cache_dir.is_dir() and cache_dir.resolve() == expected
+                          and not ios.is_symlink() and ios.resolve() == target_work / 'shader' / 'ios'
+                          and bool(re.fullmatch(r'[0-9a-f]{12}', chain or ''))
+                          and not ios_img.is_symlink() and ios_img.is_file() and ios_img.stat().st_size > 0)
+                  paths = [cache_dir / f'cas-{chain}.db{suffix}' for suffix in ('', '-wal', '-shm')] if safe else []
+                  safe = safe and all(not p.is_symlink() and (not p.exists() or p.is_file()) for p in paths)
+                  if safe:
+                      before = shutil.disk_usage(cache_dir).free
+                      removed = sum(p.stat().st_size for p in paths if p.is_file())
+                      for p in paths: p.unlink(missing_ok=True)
+                      after = shutil.disk_usage(cache_dir).free
+                      say(f'Disk-saving test: removed completed shader compile database ({removed / 1e9:.2f} GB logical); free space {before / 1e9:.2f} -> {after / 1e9:.2f} GB. Finished libraries and game image kept.')
+                  else:
+                      say('Disk-saving test: shader database safety checks did not match; database kept.')
+              elif app == 0x0100606026F12000:
+                  say('Disk-saving test: shader database kept (shared cache enabled or input combination unsupported).')
+          '''
+          text = text.replace(post_anchor, post + post_anchor, 1)
+          compile(text, str(path), 'exec')
+          path.write_text(text, encoding='utf-8')
+          print('Disk-saving test: guarded cleanup installed for this audited game and engine.')
+          PYTHON
 
       - name: Extract and stage separate RomFS
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && startsWith(inputs.romfs_mode, 'separate')
@@ -2528,6 +2670,116 @@ jobs:
           echo '- Keep this image and the IPA from this run together. The image alone is not an app, and an uploaded image does not mean the IPA build succeeded.' >> "$GITHUB_STEP_SUMMARY"
           echo '- DLC remains handled by the engine and is not included in this base/update RomFS artifact.' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Publish temporary separate RomFS GoFile download
+        if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && startsWith(inputs.romfs_mode, 'separate') && vars.GOFILE_UPLOAD != 'false'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYTHON'
+          import json, os, re, subprocess, tempfile, time
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          from urllib.request import Request, urlopen
+
+          output = Path(os.environ['ROMFS_IMAGE_PATH'])
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          api = 'https://api.gofile.io'
+          token = None
+          folder = None
+          expiry = None
+          published = False
+
+          # Never print the account token or raw API responses to the public job log.
+          def call(method, path, body, credential=None):
+              payload = json.dumps(body).encode('utf-8')
+              headers = {'Content-Type': 'application/json'}
+              if credential: headers['Authorization'] = 'Bearer ' + credential
+              req = Request(api + path, data=payload, headers=headers, method=method)
+              with urlopen(req, timeout=40) as response:
+                  result = json.load(response)
+              if result.get('status') != 'ok': raise RuntimeError('GoFile API rejected a request')
+              return result.get('data', {})
+
+          def valid_uuid(s):
+              return isinstance(s, str) and re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}', s) is not None
+
+          def set_expiry(when):
+              data = call('PUT', '/contents/' + folder + '/update',
+                          {'attribute': 'expiry', 'attributeValue': when}, token)
+              if data.get('expire') != when: raise RuntimeError('GoFile did not confirm expiry')
+
+          try:
+              # The old anonymous upload also created a guest account per upload. Here it
+              # is created first so the folder can expire BEFORE any file is uploaded.
+              account = call('POST', '/accounts', {})
+              token, root = account.get('token'), account.get('rootFolder')
+              if not isinstance(token, str) or not token or '\n' in token or '\r' in token or not valid_uuid(root):
+                  raise RuntimeError('GoFile guest account response was incomplete')
+              created = call('POST', '/contents/createFolder',
+                             {'parentFolderId': root, 'folderName': 'NxNative temporary RomFS', 'public': True}, token)
+              folder = created.get('id')
+              if not valid_uuid(folder): raise RuntimeError('GoFile folder response was incomplete')
+              expiry = int(time.time()) + 5 * 60 * 60
+              set_expiry(expiry)  # fail closed: never upload into a folder without a confirmed expiry
+              with tempfile.TemporaryDirectory(prefix='nx-gofile-', dir=os.environ['RUNNER_TEMP']) as tmp:
+                  config = Path(tmp) / 'curl.conf'
+                  response_path = Path(tmp) / 'response.json'
+                  # Token is in a mode-0600 file, not the process arguments or console.
+                  fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                  with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                      f.write('header = ' + json.dumps('Authorization: Bearer ' + token) + '\n')
+                      f.write('form = ' + json.dumps('folderId=' + folder) + '\n')
+                      f.write('form = ' + json.dumps('file=@' + str(output)) + '\n')
+                  data = None
+                  for endpoint in ('https://upload-ap-sgp.gofile.io/uploadfile', 'https://upload.gofile.io/uploadfile'):
+                      response_path.unlink(missing_ok=True)
+                      result = subprocess.run(['curl', '--silent', '--show-error', '--fail', '--connect-timeout', '30',
+                                               '--max-time', '3600', '--config', str(config), '--output', str(response_path), endpoint],
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                      if result.returncode == 0 and response_path.is_file():
+                          try:
+                              candidate = json.loads(response_path.read_text(encoding='utf-8'))
+                              d = candidate.get('data', {})
+                              if candidate.get('status') == 'ok' and d.get('parentFolder') == folder:
+                                  data = d; break
+                          except (OSError, ValueError, TypeError, AttributeError): pass
+                  if not data: raise RuntimeError('GoFile upload failed')
+                  url = data.get('downloadPage', '')
+                  parts = urlsplit(url)
+                  if (parts.scheme != 'https' or parts.netloc != 'gofile.io' or parts.query or parts.fragment
+                          or not re.fullmatch(r'/d/[A-Za-z0-9_-]{4,}', parts.path)):
+                      raise RuntimeError('GoFile download page was invalid')
+              # Prefer five hours from the completed upload; the earlier verified expiry
+              # remains a safe upper bound if this refresh fails.
+              try:
+                  later_expiry = int(time.time()) + 5 * 60 * 60
+                  set_expiry(later_expiry)
+                  expiry = later_expiry
+              except Exception:
+                  print('::warning::Could not refresh GoFile expiry after upload; the earlier confirmed expiry still applies.')
+              published = True
+              when = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiry))
+              print('GoFile RomFS download page:', url)
+              with summary.open('a', encoding='utf-8') as f:
+                  f.write('\n## Temporary GoFile RomFS download\n')
+                  f.write(f'- [Open the RomFS download page]({url})\n')
+                  f.write(f'- Folder expiry requested and confirmed by GoFile: {when} (about 5 hours).\n')
+                  f.write('- Public until expiry; anyone with access may download and keep a copy. The GoFile page is not a guaranteed direct file URL.\n')
+                  f.write('- This image is uploaded before shader compilation; it may expire before a long build finishes. Keep it with the IPA from this run.\n')
+                  f.write('- Rename the image to `romfs.img` and place it in this game app’s Documents folder. The image alone is not an app.\n')
+          except Exception:
+              # Never print exceptions: a server response could contain a credential.
+              print('::warning::GoFile upload or expiry setup failed; check the one-day GitHub RomFS artifact instead.')
+          finally:
+              if not published and token and valid_uuid(folder):
+                  try:
+                      call('DELETE', '/contents', {'contentsId': folder}, token)
+                  except Exception:
+                      # If deletion fails, a previously confirmed folder expiry still applies.
+                      print('::warning::GoFile cleanup could not be confirmed; any created folder may remain until its expiry.')
+          PYTHON
+
       - name: Build unsigned IPA
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'
         env:
@@ -2676,13 +2928,16 @@ jobs:
                               raise SystemExit('Generated host launcher settings contain Han characters; publishing stopped for review. Game UI was not audited.')
                   names = [i.filename for i in z.infolist()]
                   bundled = any(re.match(r'Payload/[^/]+\.app/romfs(?:/|\.img$)', name, re.I) for name in names)
-                  lines.append('- IPA contains a conventional bundled RomFS path.' if bundled else '- No conventional bundled RomFS path was found in the IPA (this is not a complete content audit).')
-                  ids = [i for i in z.infolist() if re.fullmatch(r'Payload/[^/]+\.app/romfs\.id', i.filename, re.I) and i.file_size <= 4096]
-                  if len(ids) == 1:
-                      identity = z.read(ids[0]).decode('utf-8', 'replace').strip().replace('`', '').replace('\n', ' ').replace('\r', ' ')
-                      lines.append(f'- RomFS identity recorded in IPA: `{identity}`')
-                  elif os.environ.get('ROMFS_INPUT', '').startswith('separate'):
-                      lines.append('- No unique RomFS identity was found in the IPA; check the engine build logs for requirements.')
+                  if os.environ.get('ROMFS_INPUT', '').startswith('separate'):
+                      lines.append('- IPA contains a conventional bundled RomFS path.' if bundled else '- No conventional bundled RomFS path was found in the IPA (this is not a complete content audit).')
+                      ids = [i for i in z.infolist() if re.fullmatch(r'Payload/[^/]+\.app/romfs\.id', i.filename, re.I) and i.file_size <= 4096]
+                      if len(ids) == 1:
+                          identity = z.read(ids[0]).decode('utf-8', 'replace').strip().replace('`', '').replace('\n', ' ').replace('\r', ' ')
+                          lines.append(f'- RomFS identity recorded in IPA: `{identity}`')
+                      else:
+                          lines.append('- No unique RomFS identity was found in the IPA; check the engine build logs for requirements.')
+                  else:
+                      lines.append('- A conventional game-data path was found inside the IPA (not a complete content audit).' if bundled else '- A conventional game-data path was not found inside the IPA; check the build logs (not a complete content audit).')
           except (zipfile.BadZipFile, OSError, ValueError, plistlib.InvalidFileException) as e:
               raise SystemExit(f'Could not inspect IPA metadata ({type(e).__name__}); publishing stopped. Check the build logs.')
           if os.environ.get('ROMFS_INPUT', '').startswith('separate'):

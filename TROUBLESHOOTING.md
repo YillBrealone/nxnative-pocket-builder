@@ -1,77 +1,153 @@
 # Troubleshooting
 
-Having trouble? Start with the first failed step in your GitHub Actions run. A completed IPA build doesn't guarantee that a game will start or play correctly.
+[Back to README](README.md)
 
-**Before sharing a screenshot or log:** remove game links, keys links, tokens and other private information. Never upload or post your `prod.keys` file. The workflow's log redaction is helpful but not guaranteed to catch everything.
+Start with the **first failed step** in the Actions run, not just the final summary. A successful survey or IPA build does not guarantee gameplay.
 
-## The workflow doesn't appear
+Before sharing logs or screenshots, remove game links, keys links, tokens and private information. Never share `prod.keys`. Redaction is best effort; review even the `NxNative-Build-Logs` artifact.
 
-- Check that GitHub Actions is enabled in your repository.
-- Check that the workflow is in `.github/workflows/` on the default branch.
-- If you're using a fork, enable Actions in your own copy.
-- If the GitHub website is awkward on an iPad, try Safari's **Request Desktop Website** or start the workflow from another device.
+## The workflow is missing or will not start
 
-If **Run workflow** appears but a run doesn't start, check the selected branch and repository permissions. A run started by **Re-run jobs** uses the original run's workflow definition; to use an updated workflow, commit it and start a new run.
+- Enable GitHub Actions in your own repository/fork.
+- Check that the workflow is under `.github/workflows/` on the default branch.
+- Choose the intended Actions entry: Generic IPA Builder, Controls Editor Test or Final Fantasy Disk-Saving Test.
+- Check the selected branch and your permissions.
+- On iPad, try Safari's Request Desktop Website or another browser/device if the Run workflow popup fails.
 
-## A game or keys download fails
+**Re-run jobs uses the original run's workflow definition.** After committing an updated workflow, start a new run to use it.
 
-- Check that the file has finished uploading and that the runner can download it without signing in or answering a confirmation prompt.
-- For a Google Drive folder, check that its contents are accessible and contain the intended packages.
-- For a direct URL, make sure it downloads the file rather than opening a sharing page.
-- For Switch 1 packages, check that your `Keys_URL` repository secret points to your own valid `prod.keys` file.
-- Check that the archive or folder contains supported packages and that they are for the same game.
+## A download or extraction fails
 
-Don't paste private links into an issue or share them with someone helping you.
+- Confirm the upload has finished and the runner can access it without an interactive login, CAPTCHA or browser-only confirmation.
+- A direct URL must download the file, not an HTML sharing page.
+- A supported Google Drive folder must expose the intended packages.
+- For Switch 1 packages, check the `Keys_URL` repository secret and that it points to your own appropriate keys file.
+- Check the archive is complete and contains supported packages for the same game.
 
-## Updates or DLC are missing
+A download, keys or extraction error does not prove game incompatibility. Never paste private URLs into issues.
 
-Include the matching update and DLC packages when you build. A Google Drive folder can contain multiple packages, subject to download and engine support.
+## An update or DLC is missing
 
-If you enter a base game link in the run form, the workflow uses the update and DLC fields from that form; it doesn't automatically mix in old update or DLC secrets. Leave a field blank only if you don't want to include that content.
+Supply the matching update and DLC packages when building. Supported Drive folders can contain multiple packages.
 
-For Switch 2 `.nup` files, support for combining separate base, update and DLC packages has not been verified. A build completing doesn't prove that every update or DLC was included or works.
+When a base game URL is entered in the run form, the form's update/DLC fields are used instead of old update/DLC secrets. Blank fields do not automatically bring those secrets back in.
 
-## Title ID or profile error
+The separate base/update RomFS image is not a complete DLC package. DLC handling remains engine-dependent. Switch 2 `.nup` support does not establish that combining separate base/update/DLC packages works.
 
-Make sure the base game is included and the package is complete. Leave `profile_id` blank for automatic detection unless you know the correct profile ID. If detection fails, check the game's title ID and the first relevant error in the log.
+## Title ID or profile errors
 
-A game profile being present—or a survey finding one—does not prove that the game is playable on your device.
+Include the complete base game. Leave `profile_id` blank for automatic detection unless you know the correct override. Do not select another game's profile merely to get past an error.
 
-## The build fails
+A profile directory or README is not certification that the game works. A provisional profile means the engine is attempting an unverified configuration, not that the game is definitely incompatible or definitely supported.
 
-1. Open the run and find the **first failed step**.
-2. Read the error and the nearby lines rather than only the final summary.
-3. Check the `NxNative-Build-Logs` artifact if one was produced. Detailed builder errors can be in `build_ipa.log`.
-4. Check the selected engine, your package versions, runner availability and free space. Large games may need substantially more runner space than the download size.
-5. Before asking for help, remove sensitive details from logs and screenshots.
+## Should I run Survey Only first?
 
-Engine branches and GitHub runner tools can change, so a workflow that worked before may need an update. Don't apply random shader, renderer or diagnostic fixes without checking that they match your engine and game.
+It is a useful first step for an unconfirmed title. It does not create an IPA or test the game on your iPhone/iPad. Passing cannot confirm graphics, sound, saving or stability.
 
-## The IPA or download is missing
+The “2-min” label is not a total-runtime promise. Downloads and setup add time. After reviewing the survey, start a new **Build IPA** run; do not assume the temporary survey data persists into it.
 
-- **Survey Only** does not build an IPA. Select **Build IPA** for a full build.
-- Check that the build reached the upload steps. A failed build may not produce an IPA.
-- Download the GitHub artifact ZIP from the run summary and extract the `.ipa`.
-- GoFile upload is attempted unless disabled with the repository variable `GOFILE_UPLOAD=false`. If it fails, look for the GitHub artifact instead. The GoFile link opens a download page, not necessarily a direct IPA URL.
+If the survey fails, distinguish input/download errors from engine analysis errors before drawing conclusions about compatibility.
 
-A public repository's artifacts and a GoFile link should not be treated as private. A bundled IPA can contain game data.
+## Which engine should an M-series iPad use?
 
-## The IPA installs but the game won't run
+For a supported M-series iPad, such as iPad Air M2, NX2Apple is the default starting point, subject to the selected revision's OS requirements. Its iPhone-focused option label does not exclude supported iPads. Standard is an alternative upstream path.
 
-Check the engine's device and OS requirements and the upstream notes for the exact game and update. Some titles are untested or need game-specific work. Switch 2 mobile support and the older-device engine are experimental.
+Do not select older-device BC fallback simply because its label mentions iPad. Do not select NX2Apple on an unsupported older device just to obtain the editor. See the engine requirements linked in the README.
 
-If you selected **separate RomFS**, the IPA alone may not contain the game data. This workflow does not upload the separate image. You need an image matching your own game and build, in the location required by the selected engine and sideloading method—commonly `Documents/romfs.img` for engines that support it.
+## Shader compilation fails or reports a chain mismatch
 
-If a game shows a black screen, graphical errors or crashes, record the game version, device, OS, selected engine and when the problem occurs. Don't assume a fix for one game or engine will work for another.
+Capture the first error, engine revision and expected/actual shader identifiers from the redacted logs. Keep the game/update versions and cache setting in your report.
 
-## Controls aren't working as expected
+**Do not rename shader libraries, copy unrelated chain headers, force a version identifier or bypass validation.** The runtime and generated shaders must agree. If an early check stops the job, that is a safeguard, not an instruction to suppress it.
 
-Open **... > Control Mode** and try the mode suited to the game. Tap and Trackpad are intended for Handheld mode. Trackpad maps dragging to the left stick and a short tap to A; it doesn't provide all the controls some games need. Not every game supports touchscreen input, and control behaviour has not been verified for every game and device.
+Main and Controls Editor Test pin the older-device engine and include early chain checks. The separate disk-test workflow is a different snapshot; do not assume it has identical revisions or checks.
 
-## Rebuilding without losing saves
+Only enable shader cache deliberately. It is off by default; cache reuse is not guaranteed and game-derived cache data may be accessible in a public repository. A warning about an unreadable shader is not by itself a diagnosis of a later crash.
 
-Back up your saves and data before replacing or reinstalling an IPA. Updates and DLC generally require a rebuild. With LiveContainer, preserve the existing app entry and data container when appropriate; changing the app identity or installing as new can leave saves in a different container. A backup is still important, and save compatibility isn't guaranteed.
+## The runner runs out of disk space
+
+Large games can need much more space than the compressed input: downloaded packages, extraction, shader intermediates and IPA packaging coexist. Separate mode reduces bundled IPA size but does not eliminate all runner storage requirements.
+
+Main and Controls Editor Test contain guarded cleanup for Final Fantasy title `0100606026F12000` on their audited NX2Apple paths. It is not a universal cleanup for all titles or engines. Unknown script revisions are rejected rather than deleting unchecked paths. Shader intermediate cleanup is conditional, including cache-disabled requirements.
+
+The dedicated Final Fantasy Disk-Saving Test remains a separate test workflow. Do not assume it includes every newer main/controller fix. Do not add broad deletion commands while shader compilation or packaging still needs the files.
+
+## The IPA or RomFS download is missing or expired
+
+- Survey Only never creates an IPA.
+- Check whether the job reached the relevant upload step.
+- An early RomFS artifact does not prove the later IPA build succeeded.
+- IPA and separate RomFS GitHub artifacts are retained for **one day**. Download the ZIP and extract it.
+- GoFile uploads request and confirm approximately **five-hour folder expiry**; check the summary for the actual expiry and whether the upload succeeded.
+- Main and Controls Editor Test attempt separate RomFS GoFile uploads; the dedicated disk test currently only provides its GitHub RomFS artifact.
+- Separate RomFS uploads happen before shaders; their GoFile link may expire before a long build ends. Use the GitHub fallback while available.
+- If GoFile is disabled with the repository variable `GOFILE_UPLOAD=false`, use GitHub artifacts. Disabling GoFile does not disable artifact uploads.
+- GitHub can require sign-in and appropriate repository access for artifact downloads. An expired link does not restore the file; you may need a fresh run.
+
+GoFile pages are not guaranteed direct file URLs. Public-repository artifacts and GoFile links are not private storage. Expiry cannot revoke downloaded copies. Build-log artifacts are retained for seven days; Actions console-log retention is separate.
+
+## Where do I put separate RomFS?
+
+Use the image and IPA from the **same run**. Extract the RomFS artifact ZIP if necessary and name the image exactly `romfs.img`, not `romfs.img.zip` or `romfs.img.img`.
+
+For engines supporting this handoff, put it at **the game's own `Documents/romfs.img`**. With LiveContainer, this means the imported game's data container, not merely LiveContainer's outer Documents directory. How you access that container depends on your LiveContainer/sideloading setup.
+
+Do not substitute an image from another game, update or unrelated run. DLC remains a separate engine concern. Bundle mode does not produce a separate RomFS download and normally does not require this placement step.
+
+## The IPA installs but black-screens, crashes or has graphical errors
+
+Check:
+
+1. Exact device and OS against the selected engine's requirements.
+2. Whether the installation/signing method supports this IPA.
+3. Game and update version, engine revision and any upstream game notes.
+4. For separate mode, the correct image, filename and game data container.
+5. Whether failure occurs immediately, after a menu, during loading or during gameplay.
+
+An unsigned IPA must be handled by an appropriate signing/container method. Successful packaging does not prove launchability. A provisional profile may still need game-specific work, and older-device/Switch 2 paths are experimental.
+
+Do not infer from a black screen alone that the cause is memory, shaders, keys or signing. Do not install unrelated quick patches or diagnostic environment flags as a blanket fix. Keep the original logs and back up saves before testing changes.
+
+## The advanced controller editor is missing
+
+Check both the **workflow** and **engine**:
+
+- Use **NxNative - Controls Editor Test**.
+- Select **NX2Apple Patched**.
+- Select **2D or 3D** in Control Mode, then open **Controls > Edit Control Layout**.
+- Tap and Trackpad do not offer this editor.
+
+Standard and the older-device engine do not currently have the advanced editor. They retain existing overall control-size/left-stick placement settings and the controller workflow's source-adapted right-stick sensitivity, but not the advanced drag/per-button resize/opacity/split-ABXY/custom-layout editor. This is a missing port, not a hidden setting.
+
+The updated NX2Apple editor has readability changes intended to reduce wrapped button text and adapt card width. These source changes have not been verified in a new complete iOS build/device test.
+
+## Combo buttons or saved layouts behave differently than expected
+
+Combo buttons are **hold-only**: selected buttons remain pressed while your finger is down and release when you lift it. Toggle and Turbo are deliberately not offered. There is no new tap-to-hold or show/hide feature.
+
+Use Done to save editor changes; Cancel discards the current edit session. Layouts are stored in the game's app preferences, not a guaranteed cross-device export. Changing underlying environment layout/size settings can reset saved layout/size edits. Reinstalling into a new app container can also lose preferences; back up saves and data first.
+
+The right-stick sensitivity setting changes virtual touch-stick gain, not physical-controller sensitivity.
+
+## Tap or Trackpad does not provide enough controls
+
+Tap sends touchscreen input where supported; not every game uses a touchscreen. Trackpad uses dragging for the left stick and a short tap for A. It is not a complete substitute for all gamepad buttons, and it does not gain editable overlay combo buttons from the NX2Apple editor.
+
+Try 2D/3D controls or a supported physical controller if the game needs additional buttons. Tap/Trackpad are intended for Handheld mode. Their behaviour has not been verified for every game/device.
+
+## Rebuild without losing saves
+
+Back up saves and game data before replacing an IPA. Updates and DLC generally require rebuilding. With LiveContainer, preserve the correct existing app identity and data container when appropriate; installing as a new entry can leave saves in the old container. Backup and save compatibility are not guaranteed by a successful build.
 
 ## Asking for help
 
-Include the device and OS version, game and update version, engine option, failed step, and the relevant **redacted** error lines. Don't include keys, private links, game files or unreviewed logs.
+Include:
+
+- Workflow name and the run's workflow/engine revision, if available.
+- Device and OS version.
+- Game and update version; title ID if known.
+- Engine, bundle/separate mode and shader-cache setting.
+- First failed step and relevant redacted error lines, or the exact runtime failure point.
+- Whether an IPA was built and how it was installed.
+
+Do not include keys, private links, tokens, game packages, RomFS images or unreviewed logs.

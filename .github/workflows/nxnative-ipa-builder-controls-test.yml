@@ -150,13 +150,13 @@ jobs:
           # Pin both the fork revision and the patch bytes; do not fetch a moving branch.
           PATCH_FILE="$RUNNER_TEMP/nxnative-touch-editor.patch"
           curl --fail --silent --show-error --location --retry 3 \
-            "https://raw.githubusercontent.com/bagasromadon/NX2Apple/d5a89c621b7894b2560b3cb3f5da426384a6ec2b/patches/0056-ios-edit-the-touch-controls-from-the-in-game-men.patch" \
+            "https://raw.githubusercontent.com/bagasromadon/NX2Apple/ba882e3f571caef2f4f0f4f58c572f13d26ca6e4/patches/0056-ios-edit-the-touch-controls-from-the-in-game-men.patch" \
             -o "$PATCH_FILE"
           python - "$PATCH_FILE" <<'PYTHON'
           import hashlib, sys
           from pathlib import Path
           data = Path(sys.argv[1]).read_bytes()
-          if hashlib.sha256(data).hexdigest() != 'c21ae8527f76d88ca8779cc258d552732927b15e933dcb0f72764ecdf4a1ad78':
+          if hashlib.sha256(data).hexdigest() != 'ee64410e35249d930cf446126d0aa258efd92e2a45ec147218cbc4d3dd3daa21':
               raise SystemExit('Editor patch failed its SHA-256 check; no changes were applied.')
           PYTHON
           # Apply only the audited geometry, gamepad, and geometry-test files.
@@ -179,13 +179,23 @@ jobs:
           h = once(h, 'void dm_pad_layout_set(int layout);', 'bool dm_pad_edit_offered(void);\nvoid dm_pad_edit_begin(void);\nvoid dm_pad_layout_set(int layout);', 'menu declarations')
           pad = Path('dm/ios/Sources/DmGamepad.m')
           p = pad.read_text(encoding='utf-8')
+          # Keep the newer editor's single-line labels and adaptive card width,
+          # but never reintroduce latching or turbo modes.
           p = once(p,
-              '_modeSeg = [[UISegmentedControl alloc] initWithItems:@[@"Hold", @"Toggle", @"Turbo"]];\n        _modeSeg.selectedSegmentIndex = (mode >= DM_PAD_MACRO_HOLD && mode <= DM_PAD_MACRO_TURBO) ? mode : DM_PAD_MACRO_HOLD;',
-              '_modeSeg = [[UISegmentedControl alloc] initWithItems:@[@"Hold"]];\n        _modeSeg.selectedSegmentIndex = DM_PAD_MACRO_HOLD;', 'macro options')
+              '_modeSeg = [[UISegmentedControl alloc] initWithItems:@[@"Hold", @"Toggle", @"Turbo"]];',
+              '_modeSeg = [[UISegmentedControl alloc] initWithItems:@[@"Hold"]];', 'macro options')
+          p = once(p,
+              '_modeSeg.selectedSegmentIndex = (mode >= DM_PAD_MACRO_HOLD && mode <= DM_PAD_MACRO_TURBO) ? mode : DM_PAD_MACRO_HOLD;',
+              '_modeSeg.selectedSegmentIndex = DM_PAD_MACRO_HOLD;', 'macro selection')
           p = once(p, 'if (macroText && dm_pad_macros_parse(macroText.UTF8String, &m)) _macros = m;',
               'if (macroText && dm_pad_macros_parse(macroText.UTF8String, &m)) {\n        for (int set = 0; set < DM_PAD_SET_N; set++) for (int i = 0; i < DM_PAD_MACRO_MAX; i++) m.items[set][i].mode = DM_PAD_MACRO_HOLD;\n        _macros = m;\n    }', 'saved macro modes')
           p = once(p, 'm->mode = (mode >= DM_PAD_MACRO_HOLD && mode <= DM_PAD_MACRO_TURBO) ? mode : DM_PAD_MACRO_HOLD;',
               'm->mode = DM_PAD_MACRO_HOLD;', 'macro mode save')
+          for required in ('edit_one_line', 'edit_capped_font', 'minimumUsableWidth', 'edit_flat_label'):
+              if required not in p:
+                  raise SystemExit('Control editor readability check failed: ' + required)
+          if 'initWithItems:@[@"Hold", @"Toggle", @"Turbo"]' in p:
+              raise SystemExit('Control editor must offer hold-only combinations.')
           header.write_text(h, encoding='utf-8')
           pad.write_text(p, encoding='utf-8')
           print('Editor source applied. Combination buttons are active only while held; tap-to-latch and turbo are not offered.')

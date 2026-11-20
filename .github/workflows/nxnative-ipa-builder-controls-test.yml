@@ -2860,8 +2860,13 @@ jobs:
                           MLOG("[ASH-MSAA-v1] resolve actual=%lu->%lu", (unsigned long)s.sampleCount, (unsigned long)d.sampleCount);
                   }'''
           HOOK = '    python3 "$IOS_SOURCE/tools/prepare_legacy_resources.py"'
+          PROFILE_GUARD = '''    # Check the actual profile after the builder's provisional-profile creation.
+              ASH_PROGRAM_ID=$(gp program_id)
+              python3 -c 'import sys; sys.exit(0 if sys.argv[1] == "01004890117B2000" and int(sys.argv[2], 16) == 0x01004890117B2000 else "A Short Hike: final profile identity mismatch")' "$GAME" "$ASH_PROGRAM_ID" ||
+                die "A Short Hike final profile guard failed"
+          '''
           NEW_HOOK = '''    # ASH-MSAA-v1: diagnostics only; do not modify source/reflection or audit policy.
-              python3 "$IOS_SOURCE/tools/collect_short_hike_evidence.py" "$LEGACY_MSL_CACHE/b-$V" "$MSL_IOS/b-$V" ||
+          ''' + PROFILE_GUARD + '''    python3 "$IOS_SOURCE/tools/collect_short_hike_evidence.py" "$LEGACY_MSL_CACHE/b-$V" "$MSL_IOS/b-$V" ||
                 die "A Short Hike shader evidence collection failed"
           ''' + HOOK
 
@@ -2873,11 +2878,19 @@ jobs:
 
 
           def apply(root, env, collector):
-              for key, value in {'DETECTED_TITLE_ID': TITLE, 'DM_GAME': TITLE, 'ENGINE_REV': ENGINE,
+              for key, value in {'DETECTED_TITLE_ID': TITLE, 'ENGINE_REV': ENGINE,
                                  'DEVICE_INPUT': DEVICE, 'CACHE_INPUT': 'false',
                                  'MODE_INPUT': 'Build IPA (Default)'}.items():
                   if env.get(key) != value:
                       raise ValueError('A Short Hike: incorrect ' + key + '; no files changed')
+              # DM_GAME is a preliminary workflow hint here, not the final builder profile.
+              # Unprofiled games start as DEFAULT; the NSP builder creates a title-specific
+              # provisional profile later. The packaging hook verifies that final identity.
+              profile = env.get('DM_GAME')
+              if profile not in (TITLE, 'DEFAULT'):
+                  raise ValueError('A Short Hike: unexpected preliminary profile; no files changed')
+              if profile == 'DEFAULT' and (root / 'dm/games' / TITLE).exists():
+                  raise ValueError('A Short Hike: DEFAULT conflicts with an existing title profile; no files changed')
               originals = {}
               for name, digest in EXPECTED.items():
                   data = (root / name).read_bytes()
@@ -2903,7 +2916,8 @@ jobs:
               # All guards completed before writing anything.
               for name, text in changes.items():
                   (root / name).write_text(text, encoding='utf-8')
-              report = {'test': 'ASH-MSAA-v1', 'title': TITLE, 'engine': ENGINE,
+              report = {'test': 'ASH-MSAA-v1', 'workflow_revision': 'profile-guard-v2',
+                        'preliminary_profile': profile, 'title': TITLE, 'engine': ENGINE,
                         'before': EXPECTED, 'after': {n: hashlib.sha256(t.encode()).hexdigest() for n, t in changes.items()},
                         'apple_compiled_here': False, 'gameplay_verified': False,
                         'scope': 'Capability-checked 8-to-4 host-only experiment; GPU-only non-image textures. Guest descriptors/layouts unchanged.',

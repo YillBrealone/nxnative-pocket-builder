@@ -1979,6 +1979,95 @@ jobs:
           echo "DETECTED_TITLE_ID=$DETECTED_ID" >> "$GITHUB_ENV"
           echo "IPA_FILENAME=$IPA_FILENAME" >> "$GITHUB_ENV"
 
+      - name: Apply Downwell-only dynamic error-handler test
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        env:
+          DEVICE_INPUT: ${{ inputs.device }}
+          CACHE_INPUT: ${{ inputs.shader_cache }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_DOWNWELL'
+          """Downwell-only legacy source patch. Invoked inline by the delivered test workflow.
+          No game data, keys, environment flags or shader changes. Refuse unknown inputs.
+          """
+          import hashlib
+          import os
+          from pathlib import Path
+
+          TITLE = '010093D00C726000'
+          ENGINE = 'b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14'
+          DEVICE = 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+          SYMBOL = '_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE'
+          EXPECTED = {'dm/host/hle_ro.c': '1b96856597f14af87a4f631a98d8ac106c30a0d725b6471bbddddfcfafb8983d', 'dm/host/hle_offline.c': '7083a678e60f5e99dae9dcfcb8a0ed135dfca3d699199374bd235f770a032cbb', 'dm/host/hle.h': 'c75806fef578937d596b9cf52d3a35ed1429a80fdec6db7418e6c12d9c23e2f3'}
+
+          OLD_LOOKUP = '    void *p = name ? guest_sym(name) : NULL;'
+          NEW_LOOKUP = '''    // Downwell test v1: this ONE dynamic export must use its existing host handler.
+              // This source change is installed only for the Downwell legacy test build.
+              extern void *dm_downwell_application_error_handler(void);
+              void *p;
+              if (name && !strcmp(name, "_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE")) {
+                  p = dm_downwell_application_error_handler();
+                  LOG("Downwell test: dynamic ShowApplicationError routed to host");
+              } else {
+                  p = name ? guest_sym(name) : NULL;
+              }'''
+          OLD_HANDLER = '''HLE_FORCE("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "application error applet; the host only logs it", void, h_err_ShowApp, const void *arg) { DM_APPLET("error"); (void)arg; LOG("game asks to show an application error (ApplicationErrorArg)"); }'''
+          NEW_HANDLER = '''HLE_FORCE("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "application error applet; the host only logs it", void, h_err_ShowApp, const void *arg) {
+              DM_APPLET("error");
+              LOG("game asks to show an application error (ApplicationErrorArg)");
+              // Layout verified against Downwell 1.0.0's SDK 5.4 getters. Do not guess other SDKs.
+              if (arg && dm_sdk_major() == 5) {
+                  const unsigned char *a = arg;
+                  uint32_t code;
+                  memcpy(&code, a + 8, sizeof code);
+                  // The dialog field starts at +0x14 and holds 0x800 bytes. Limit output to
+                  // 255 bytes and sanitize line/control characters. Never treat it as a format.
+                  char message[256];
+                  size_t n = 0;
+                  while (n < sizeof message - 1 && a[0x14 + n]) {
+                      unsigned char c = a[0x14 + n];
+                      message[n++] = c < 32 || c == 127 ? ' ' : (char)c;
+                  }
+                  message[n] = 0;
+                  LOG("Downwell test: application error code=%u dialog=%s", (unsigned)code, message);
+              } else {
+                  LOG("Downwell test: error argument not decoded (null or SDK other than 5)");
+              }
+          }
+          // Return the SAME handler registered by HLE_FORCE, preserving its applet lifecycle.
+          // No general change to guest_sym, LookupModuleSymbol, or other dynamic exports.
+          void *dm_downwell_application_error_handler(void) { return (void *)h_err_ShowApp; }'''
+
+
+          def apply(root, env):
+              if env.get('DETECTED_TITLE_ID') != TITLE:
+                  raise ValueError('Downwell test: wrong title; no files changed')
+              if env.get('DEVICE_INPUT') != DEVICE or env.get('ENGINE_REV') != ENGINE:
+                  raise ValueError('Downwell test requires the pinned Metal 3 + BC fallback engine, even on iPhone 17 Pro')
+              if env.get('CACHE_INPUT') != 'false':
+                  raise ValueError('Downwell test requires shader_cache unchecked for a fresh capture')
+              originals = {}
+              for name, expected in EXPECTED.items():
+                  data = (root / name).read_bytes()
+                  if hashlib.sha256(data).hexdigest() != expected:
+                      raise ValueError(f'Downwell test: source hash mismatch or patch already applied: {name}; no files changed')
+                  originals[name] = data.decode('utf-8')
+              changes = {}
+              for name, old, new in [('dm/host/hle_ro.c', OLD_LOOKUP, NEW_LOOKUP),
+                                     ('dm/host/hle_offline.c', OLD_HANDLER, NEW_HANDLER)]:
+                  if originals[name].count(old) != 1:
+                      raise ValueError(f'Downwell test: expected exactly one source anchor in {name}; no files changed')
+                  changes[name] = originals[name].replace(old, new)
+              # All source/anchor checks finish before either source is written.
+              for name, text in changes.items():
+                  (root / name).write_text(text, encoding='utf-8')
+              print('Downwell test v1: guarded source patch applied to Mac capture and iOS shared host sources')
+
+          if __name__ == '__main__':
+              apply(Path('.'), os.environ)
+          PY_DOWNWELL
+
       - name: Verify host UI and applied source patches
         shell: bash
         run: |
@@ -2742,6 +2831,72 @@ jobs:
 
           echo "IPA successfully created: $OUTPUT"
           ls -lh "$OUTPUT"
+
+      - name: Verify Downwell capture and iOS patch before publication
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_DOWNWELL'
+          """Build evidence gate v2, not a gameplay test. Runs before IPA publication."""
+          import os
+          from pathlib import Path
+          import plistlib
+          import re
+          import zipfile
+
+          ROUTE = b'Downwell test: dynamic ShowApplicationError routed to host'
+          MESSAGE = b'Downwell test: application error code='
+          STOP = b'received SIGTERM: graceful exit'
+          DONE = b'graceful exit done'
+
+          def verify(root, ipa):
+              logs = list(root.glob('**/logs/gl_capture.log'))
+              if len(logs) != 1:
+                  raise ValueError(f'Downwell test: expected one fresh GL capture log, found {len(logs)}')
+              data = logs[0].read_bytes()
+              if re.search(rb'CRASH\s+sig\s*=', data):
+                  raise ValueError('Downwell test: Mac capture still crashed; refusing IPA publication. Inspect build logs.')
+              if ROUTE not in data:
+                  raise ValueError('Downwell test: capture did not select the patched host handler; inspect build logs')
+              if not re.search(rb'\[gl\] frame [1-9][0-9]*:', data):
+                  raise ValueError('Downwell test: capture has no recorded GL frame progress; inspect build logs')
+              if STOP not in data or DONE not in data or data.rfind(DONE) < data.rfind(STOP):
+                  raise ValueError('Downwell test: orderly capture shutdown not recorded; inspect build logs')
+              # Resolving the function at startup and invoking it later are separate events.
+              # A capture that stops normally before the dialog is shown is not a routing failure.
+              warning_logged = MESSAGE in data
+              with zipfile.ZipFile(ipa) as z:
+                  plists = [n for n in z.namelist() if re.fullmatch(r'Payload/[^/]+\.app/Info\.plist', n)]
+                  if len(plists) != 1:
+                      raise ValueError('Downwell test: unexpected IPA app layout')
+                  info = plistlib.loads(z.read(plists[0]))
+                  exe = info['CFBundleExecutable']
+                  if not isinstance(exe, str) or '/' in exe or exe in ('', '.', '..'):
+                      raise ValueError('Downwell test: invalid IPA executable name')
+                  binary = z.read(plists[0].rsplit('/', 1)[0] + '/' + exe)
+                  if ROUTE not in binary or MESSAGE not in binary:
+                      raise ValueError('Downwell test: patched handler markers missing from iOS executable')
+              print('Downwell test v2: host route selected, GL frame progress and orderly capture shutdown recorded, iOS patch markers present')
+              if warning_logged:
+                  print('Downwell test: application error argument was logged during capture')
+              else:
+                  print('::warning::Downwell test: application error argument was not logged during capture; runtime handler execution is not verified by this capture')
+              print('This does NOT establish full shader coverage, rendered visuals or working iPhone gameplay.')
+              return warning_logged
+
+          if __name__ == '__main__':
+              root = Path(os.environ['RUNNER_TEMP'])
+              warning_logged = verify(root / 'GameFiles', root / os.environ['IPA_FILENAME'])
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                  f.write('\n## Downwell startup test: capture check v2\n'
+                          '- Mac dynamic lookup selected the patched host handler.\n'
+                          '- GL frame progress and orderly capture shutdown recorded; no crash signature in that log.\n'
+                          '- iOS executable contains the patched route and warning markers.\n')
+                  f.write('- Application error argument logged during capture.\n' if warning_logged else
+                          '- **Not exercised/verified:** application error argument was not logged during capture.\n')
+                  f.write('- **Still required:** iPhone startup, warning-path and gameplay tests. Rendered visuals and full shader coverage are not established.\n')
+          PY_DOWNWELL
 
       - name: Report IPA identity, size, hash and RomFS requirements
         if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'

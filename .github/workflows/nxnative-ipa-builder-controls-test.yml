@@ -82,7 +82,8 @@ jobs:
           EXPECTED_XCODE="27.1"
           PREFERRED="/Applications/Xcode_${EXPECTED_XCODE}.app/Contents/Developer"
           if [[ -d "$PREFERRED" ]]; then export DEVELOPER_DIR="$PREFERRED"; fi
-          ACTUAL="$(xcodebuild -version | head -n 1)"
+          XCODE_VERSION="$(xcodebuild -version)"
+          ACTUAL="${XCODE_VERSION%%$'\n'*}"
           if [[ "$ACTUAL" != "Xcode $EXPECTED_XCODE" ]]; then
             echo "::error::This update was prepared for Xcode $EXPECTED_XCODE; runner selected $ACTUAL. Review the toolchain before changing the version check."
             exit 1

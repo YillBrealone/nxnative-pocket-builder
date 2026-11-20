@@ -1,4 +1,4 @@
-name: NxNative - Controls Editor Test
+name: NxNative - A Short Hike MSAA Experiment
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: "Choose engine (layout editor currently NX2Apple only)"
         required: true
         type: choice
-        default: "iPhone 15 Pro/Pro Max or newer - NX2Apple Patched (Default)"
+        default: "iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)"
         options:
           - "iPhone 15 Pro/Pro Max or newer - NX2Apple Patched (Default)"
           - "iPhone 15 Pro/Pro Max or newer (standard)"
@@ -30,6 +30,11 @@ on:
           - "separate (IPA without bundled RomFS; size varies)"
       shader_cache:
         description: "Opt in to GitHub shader cache (may contain game-derived data accessible in a public repo)"
+        required: false
+        type: boolean
+        default: false
+      export_shader_sources:
+        description: "Opt in: publish 12 game-derived shader sources/reflections for diagnosis (public artifact, 1 day)"
         required: false
         type: boolean
         default: false
@@ -75,6 +80,25 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Guard A Short Hike experiment inputs
+        env:
+          DEVICE_INPUT: ${{ inputs.device }}
+          MODE_INPUT: ${{ inputs.build_mode }}
+          CACHE_INPUT: ${{ inputs.shader_cache }}
+          PROFILE_INPUT: ${{ inputs.profile_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          expected = {'DEVICE_INPUT': 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)',
+                      'MODE_INPUT': 'Build IPA (Default)', 'CACHE_INPUT': 'false', 'PROFILE_INPUT': ''}
+          for key, value in expected.items():
+              if os.environ.get(key) != value:
+                  raise SystemExit('A Short Hike experiment requires legacy iPad engine, Build IPA, shader cache OFF, and no profile override.')
+          print('Experimental test only: unsupported 8x MSAA; Tier1 sampler/SIMD issues remain unresolved.')
+          PY
+
       - name: Select and verify the reference Xcode toolchain
         shell: bash
         run: |
@@ -2152,7 +2176,7 @@ jobs:
           echo "IPA_FILENAME=$IPA_FILENAME" >> "$GITHUB_ENV"
 
       - name: Apply Downwell-only dynamic error-handler test
-        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000'
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
         env:
           DEVICE_INPUT: ${{ inputs.device }}
           CACHE_INPUT: ${{ inputs.shader_cache }}
@@ -2754,6 +2778,148 @@ jobs:
               f.write('## Host source checks\n- Control labels and selected patch markers found; host UI sources scanned for literal Han characters.\n- Not a device test or a guarantee about game text, escaped strings, all resources, or touch behaviour.\n\n')
           PYTHON
 
+      - name: Apply guarded A Short Hike MSAA experiment
+        env:
+          DEVICE_INPUT: ${{ inputs.device }}
+          MODE_INPUT: ${{ inputs.build_mode }}
+          CACHE_INPUT: ${{ inputs.shader_cache }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'ASH_PATCH'
+          """Guarded A Short Hike MSAA experiment, not a rendering-compatibility fix."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          TITLE = '01004890117B2000'
+          ENGINE = 'b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14'
+          DEVICE = 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+          EXPECTED = {'dm/gfx/nvn/nvn_mtl_legacy.inc': '351268eb459d0038826f8a20f374001ac4e1b9b497ef73c69f872bf8531b68cb',
+                      'dm/ios/tools/build_ipa.sh': '174019237dd0fd3b4bd92b753ffc1eacc20a9224ec97415cde79a415a4f1af22'}
+          DECISION = '''static unsigned ash_msaa_decide(unsigned requested, int eligible, int supports_requested, int supports_four) {
+              return requested == 8 && eligible && !supports_requested && supports_four ? 4 : requested;
+          }
+          '''
+          HELPER = '''// ASH-MSAA-v1: experimental host-only quality reduction for ONE title.
+          // Never change NVN descriptors, guest allocation sizes, layouts, or getters.
+          ''' + DECISION + '''static NSUInteger ash_msaa_samples(const tex_t *t, int packaged) {
+              unsigned requested = t->d.samples;
+              if (DM_GAME_PROGRAM_ID != 0x01004890117B2000ull || requested != 8) return requested;
+              int eligible = !packaged && !t->has_layout && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE);
+              int s8 = [g_dev supportsTextureSampleCount:8], s4 = [g_dev supportsTextureSampleCount:4];
+              unsigned actual = ash_msaa_decide(requested, eligible, s8, s4);
+              if (!s8) {
+                  static _Atomic unsigned reports;
+                  if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 16)
+                      MLOG("[ASH-MSAA-v1] %s requested=8 actual=%u supports4=%d eligible=%d target=%d ser=%llu; sample-index semantics unverified",
+                           actual == 4 ? "fallback" : "NOT remapped", actual, s4, eligible, t->d.target, (unsigned long long)t->serial);
+              }
+              return actual;
+          }
+          '''
+          SAMPLED_OLD = '''    id<MTLTexture> mt = tex_mtl(t);
+              g_texture_sampled = false;
+              return mt;'''
+          SAMPLED_NEW = '''    id<MTLTexture> mt = tex_mtl(t);
+              if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && t && t->d.samples == 8 && mt && mt.sampleCount == 4) {
+                  static _Atomic unsigned reports;
+                  if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8)
+                      MLOG("[ASH-MSAA-v1] sampled remapped texture ser=%llu: per-sample shader reads are NOT proven safe", (unsigned long long)t->serial);
+              }
+              g_texture_sampled = false;
+              return mt;'''
+          PASS_ANCHOR = '        pass_dims(pd, (NSUInteger)physical_colors, &g_pass.tw, &g_pass.th);'
+          PASS_TRACE = '''        if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && g_pass.samples > 1) {
+                      static _Atomic unsigned reports;
+                      if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8) {
+                          unsigned mismatch = 0;
+                          for (int ai = 0; ai < physical_colors && ai < 8; ai++) {
+                              id<MTLTexture> at = pd.colorAttachments[ai].texture;
+                              mismatch |= at && at.sampleCount != g_pass.samples;
+                          }
+                          mismatch |= dt && dt.sampleCount != g_pass.samples;
+                          mismatch |= stt && stt.sampleCount != g_pass.samples;
+                          MLOG("[ASH-MSAA-v1] pass actual=%u attachment_mismatch=%u", g_pass.samples, mismatch);
+                      }
+                  }
+          '''
+          PSO_ANCHOR = '    d.rasterSampleCount = k->samples ? k->samples : 1;'
+          PSO_TRACE = '''
+              if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && d.rasterSampleCount > 1) {
+                  static _Atomic unsigned reports;
+                  if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8)
+                      MLOG("[ASH-MSAA-v1] pipeline actual=%lu", (unsigned long)d.rasterSampleCount);
+              }'''
+          RESOLVE_ANCHOR = '    if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy'
+          RESOLVE_TRACE = '''
+                  if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && c->src->d.samples == 8) {
+                      static _Atomic unsigned reports;
+                      if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8)
+                          MLOG("[ASH-MSAA-v1] resolve actual=%lu->%lu", (unsigned long)s.sampleCount, (unsigned long)d.sampleCount);
+                  }'''
+          HOOK = '    python3 "$IOS_SOURCE/tools/prepare_legacy_resources.py"'
+          NEW_HOOK = '''    # ASH-MSAA-v1: diagnostics only; do not modify source/reflection or audit policy.
+              python3 "$IOS_SOURCE/tools/collect_short_hike_evidence.py" "$LEGACY_MSL_CACHE/b-$V" "$MSL_IOS/b-$V" ||
+                die "A Short Hike shader evidence collection failed"
+          ''' + HOOK
+
+
+          def replace_once(text, old, new):
+              if text.count(old) != 1:
+                  raise ValueError('A Short Hike: source anchor changed; refusing patch')
+              return text.replace(old, new, 1)
+
+
+          def apply(root, env, collector):
+              for key, value in {'DETECTED_TITLE_ID': TITLE, 'DM_GAME': TITLE, 'ENGINE_REV': ENGINE,
+                                 'DEVICE_INPUT': DEVICE, 'CACHE_INPUT': 'false',
+                                 'MODE_INPUT': 'Build IPA (Default)'}.items():
+                  if env.get(key) != value:
+                      raise ValueError('A Short Hike: incorrect ' + key + '; no files changed')
+              originals = {}
+              for name, digest in EXPECTED.items():
+                  data = (root / name).read_bytes()
+                  if hashlib.sha256(data).hexdigest() != digest:
+                      raise ValueError('A Short Hike: unknown or already-patched source: ' + name)
+                  originals[name] = data.decode('utf-8')
+              new_tool = root / 'dm/ios/tools/collect_short_hike_evidence.py'
+              if new_tool.exists():
+                  raise ValueError('A Short Hike: evidence collector already exists')
+              inc_name, sh_name = EXPECTED
+              inc = originals[inc_name]
+              inc = replace_once(inc, 'static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {',
+                                 HELPER + 'static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {')
+              if inc.count('d.sampleCount = t->d.samples;') != 2:
+                  raise ValueError('A Short Hike: multisample descriptor sites changed')
+              inc = inc.replace('d.sampleCount = t->d.samples;', 'd.sampleCount = ash_msaa_samples(t, packaged);')
+              inc = replace_once(inc, SAMPLED_OLD, SAMPLED_NEW)
+              inc = replace_once(inc, PASS_ANCHOR, PASS_TRACE + PASS_ANCHOR)
+              inc = replace_once(inc, PSO_ANCHOR, PSO_ANCHOR + PSO_TRACE)
+              inc = replace_once(inc, RESOLVE_ANCHOR, RESOLVE_ANCHOR + RESOLVE_TRACE)
+              sh = replace_once(originals[sh_name], HOOK, NEW_HOOK)
+              changes = {inc_name: inc, sh_name: sh, 'dm/ios/tools/collect_short_hike_evidence.py': collector}
+              # All guards completed before writing anything.
+              for name, text in changes.items():
+                  (root / name).write_text(text, encoding='utf-8')
+              report = {'test': 'ASH-MSAA-v1', 'title': TITLE, 'engine': ENGINE,
+                        'before': EXPECTED, 'after': {n: hashlib.sha256(t.encode()).hexdigest() for n, t in changes.items()},
+                        'apple_compiled_here': False, 'gameplay_verified': False,
+                        'scope': 'Capability-checked 8-to-4 host-only experiment; GPU-only non-image textures. Guest descriptors/layouts unchanged.',
+                        'unresolved': ['Per-sample shader semantics and readback', 'Tier1 sampler resource limits', 'SIMD shuffle pipeline compilation']}
+              print('A Short Hike: guarded ASH-MSAA-v1 experiment installed; NOT a complete rendering fix.')
+              return report
+
+          COLLECTOR = '"""A Short Hike test: metadata-only scan; exact sources exported ONLY by opt-in.\nCalled before legacy resource preparation, so an audit failure retains evidence.\nNo shader rewriting, compilation, key files or arbitrary directory copying.\n"""\nimport argparse\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\nimport re\n\nKEYS = tuple(k + \'_b\' for k in (\n    \'fec55b165d758477\', \'2da8fe1e48d71ef4\', \'d64b06e18d2e96b8\', \'59d87b34da178c24\',\n    \'4bc915e60a90ea9c\', \'6722a106e60722d0\', \'c5848a7529303717\', \'f6b0029964fa5b48\',\n    \'d39d0cd3d742b7ad\', \'f5203b024353fef1\', \'7ff75adcbdf67493\', \'f9aedb21d47d6aef\'))\nTOKENS = (\'texture2d_ms\', \'texture2d_ms_array\', \'get_num_samples\', \'sample_id\',\n          \'sample_mask\', \'sample_position\', \'interpolate_at_sample\', \'simd_shuffle\')\nLIMIT = 4 * 1024 * 1024\n\n\ndef safe_read(root, path):\n    # No symlinks at any level, no paths outside the explicit shader root.\n    root = root.absolute()\n    path = path.absolute()\n    path.relative_to(root)\n    for parent in (path, *path.parents):\n        if parent.is_symlink():\n            raise ValueError(\'Shader evidence refuses symbolic links\')\n    if not path.is_file():\n        return None\n    if path.stat().st_size > LIMIT:\n        raise ValueError(\'Shader evidence input exceeds 4 MiB limit\')\n    return path.read_bytes()\n\n\ndef collect(cache, libraries, output, export=False):\n    if not re.fullmatch(r\'b-[a-f0-9]+\', cache.name) or libraries.name != cache.name:\n        raise ValueError(\'Shader evidence requires matching chain directories\')\n    if output.exists():\n        raise ValueError(\'Refusing to merge with an earlier shader evidence directory\')\n    output.mkdir(parents=True)\n    report = {\'schema\': 1, \'test\': \'ASH-MSAA-v1\', \'chain\': cache.name[2:],\n              \'source_export_opted_in\': export, \'gameplay_verified\': False,\n              \'scan_is_semantic_proof\': False,\n              \'warning\': \'Token scan only. Absence does not prove sample-index safety. Tier1 sampler and SIMD failures remain unresolved.\',\n              \'scanned_sources\': 0, \'sample_or_simd_tokens\': {}, \'selected\': {}}\n    counts = {token: 0 for token in TOKENS}\n    for p in sorted(cache.glob(\'*_b.metal\')):\n        if not re.fullmatch(r\'[a-f0-9]{16}_b\\.metal\', p.name):\n            continue\n        text = safe_read(cache, p).decode(\'utf-8\')\n        report[\'scanned_sources\'] += 1\n        hits = [token for token in TOKENS if re.search(r\'\\b\' + token + r\'\\b\', text)]\n        for token in hits:\n            counts[token] += 1\n        if hits and len(report[\'sample_or_simd_tokens\']) < 100:\n            report[\'sample_or_simd_tokens\'][p.stem] = hits\n    report[\'token_source_counts\'] = counts\n    report[\'token_key_list_limit\'] = 100\n    for key in KEYS:\n        record = {}\n        for label, root, p in (\n                (\'source\', cache, cache / (key + \'.metal\')),\n                (\'native-reflection\', cache, cache / (key + \'.json\')),\n                (\'ios-reflection\', libraries, libraries / (key + \'.json\'))):\n            data = safe_read(root, p)\n            if data is None:\n                record[label] = {\'present\': False}\n                continue\n            if label.endswith(\'reflection\'):\n                meta = json.loads(data)\n                if meta.get(\'key\', key) != key or meta.get(\'chain\', report[\'chain\']) != report[\'chain\']:\n                    raise ValueError(\'Selected shader reflection identity mismatch\')\n            record[label] = {\'present\': True, \'sha256\': hashlib.sha256(data).hexdigest(), \'bytes\': len(data)}\n            if export:\n                dest = output / \'sources\' / (label + \'-\' + p.name)\n                dest.parent.mkdir(exist_ok=True)\n                dest.write_bytes(data)\n        # Library bytes are never exported, but the digest binds the evidence.\n        lib = safe_read(libraries, libraries / (key + \'.metallib\'))\n        record[\'ios-library\'] = {\'present\': lib is not None,\n                                 \'sha256\': hashlib.sha256(lib).hexdigest() if lib is not None else None}\n        report[\'selected\'][key] = record\n    (output / \'shader-evidence.json\').write_text(json.dumps(report, indent=2) + \'\\n\')\n    print(\'A Short Hike: metadata scan saved; exact shader source export \' + (\'enabled by opt-in.\' if export else \'OFF.\'))\n    return report\n\n\nif __name__ == \'__main__\':\n    parser = argparse.ArgumentParser(description=__doc__)\n    parser.add_argument(\'cache\', type=Path)\n    parser.add_argument(\'libraries\', type=Path)\n    args = parser.parse_args()\n    output = Path(os.environ[\'RUNNER_TEMP\']) / \'short-hike-evidence\'\n    collect(args.cache, args.libraries, output, os.environ.get(\'ASH_EXPORT_SOURCES\') == \'true\')\n'
+          report = apply(Path('.'), os.environ, COLLECTOR)
+          out = Path(os.environ['RUNNER_TEMP']) / 'short-hike-audit'
+          out.mkdir(exist_ok=True)
+          (out / 'source-patch.json').write_text(json.dumps(report, indent=2) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## A Short Hike experiment\nCapability-checked 8-to-4 MSAA only for eligible GPU textures. Guest layout remains unchanged; sample-index safety is NOT proven. Tier1 sampler and SIMD pipeline problems are NOT fixed. The inherited m2 resource policy is not an A12Z compatibility certificate.\n')
+          ASH_PATCH
+
       - name: Pre-build checks and summary
         env:
           DEVICE_INPUT: ${{ inputs.device }}
@@ -3087,6 +3253,7 @@ jobs:
       - name: Extract and stage separate RomFS
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && startsWith(inputs.romfs_mode, 'separate')
         env:
+          ASH_EXPORT_SOURCES: ${{ inputs.export_shader_sources }}
           ROMFS_MODE_INPUT: ${{ inputs.romfs_mode }}
           LANG_INPUT: ${{ inputs.language }}
           SHOW_FPS_INPUT: ${{ inputs.show_fps }}
@@ -3366,6 +3533,7 @@ jobs:
       - name: Build unsigned IPA
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'
         env:
+          ASH_EXPORT_SOURCES: ${{ inputs.export_shader_sources }}
           ROMFS_MODE_INPUT: ${{ inputs.romfs_mode }}
           LANG_INPUT: ${{ inputs.language }}
           SHOW_FPS_INPUT: ${{ inputs.show_fps }}
@@ -3470,7 +3638,7 @@ jobs:
           ls -lh "$OUTPUT"
 
       - name: Verify Downwell capture and iOS patch before publication
-        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000'
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
         shell: bash
         run: |
           set -euo pipefail
@@ -3534,6 +3702,35 @@ jobs:
                           '- **Not exercised/verified:** application error argument was not logged during capture.\n')
                   f.write('- **Still required:** iPhone startup, warning-path and gameplay tests. Rendered visuals and full shader coverage are not established.\n')
           PY_DOWNWELL
+
+      - name: Verify A Short Hike experiment markers before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, plistlib, zipfile
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          p = root / os.environ['IPA_FILENAME']
+          with zipfile.ZipFile(p) as z:
+              infos = [n for n in z.namelist() if n.startswith('Payload/') and n.count('/') == 2 and n.endswith('.app/Info.plist')]
+              if len(infos) != 1: raise SystemExit('A Short Hike gate: expected one app Info.plist')
+              info = plistlib.loads(z.read(infos[0]))
+              name = info['CFBundleExecutable']
+              if not isinstance(name, str) or '/' in name or name in ('.', '..'):
+                  raise SystemExit('A Short Hike gate: invalid executable name')
+              binary = z.read(infos[0].rsplit('/', 1)[0] + '/' + name)
+              markers = (b'[ASH-MSAA-v1] %s requested=8 actual=', b'[ASH-MSAA-v1] pass actual=',
+                         b'[ASH-MSAA-v1] pipeline actual=', b'[ASH-MSAA-v1] resolve actual=',
+                         b'per-sample shader reads are NOT proven safe')
+              if not all(marker in binary for marker in markers):
+                  raise SystemExit('A Short Hike gate: experiment markers missing in IPA; do not publish')
+          report = {'test': 'ASH-MSAA-v1', 'executable_sha256': hashlib.sha256(binary).hexdigest(),
+                    'experiment_markers_present': True, 'device_run_verified': False,
+                    'note': 'Packaging identity check ONLY; not a Metal pipeline, image-correctness or gameplay test.'}
+          (root / 'short-hike-audit/ipa-marker-check.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(report['note'])
+          PY
 
       - name: Report IPA identity, size, hash and RomFS requirements
         if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'
@@ -3734,6 +3931,41 @@ jobs:
             echo "IPA artifact upload failed; check the upload step log." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Stage A Short Hike metadata report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          p = root / 'short-hike-evidence/shader-evidence.json'
+          if p.is_file() and not p.is_symlink():
+              json.loads(p.read_text())
+              out = root / 'short-hike-audit'
+              out.mkdir(exist_ok=True)
+              shutil.copyfile(p, out / 'shader-evidence.json')
+          PY
+
+      - name: Upload A Short Hike metadata (no shader source)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: A-Short-Hike-Test-Report
+          path: ${{ runner.temp }}/short-hike-audit/*.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Upload selected game-derived shaders (explicit opt-in only)
+        if: always() && inputs.export_shader_sources
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: A-Short-Hike-Shader-Evidence-OPT-IN
+          path: ${{ runner.temp }}/short-hike-evidence/sources/
+          if-no-files-found: ignore
+          retention-days: 1
+
       - name: Prepare redacted build logs
         if: always()
         env:
@@ -3812,7 +4044,7 @@ jobs:
           name: NxNative-Build-Logs
           path: ${{ runner.temp }}/nxnative-redacted-logs/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
 
       - name: Report failure troubleshooting
         if: failure()
@@ -3832,4 +4064,6 @@ jobs:
           rm -rf \
             "$RUNNER_TEMP/nxnative" \
             "$RUNNER_TEMP/GameFiles" \
-            "$RUNNER_TEMP/nxnative-redacted-logs"
+            "$RUNNER_TEMP/nxnative-redacted-logs" \
+            "$RUNNER_TEMP/short-hike-audit" \
+            "$RUNNER_TEMP/short-hike-evidence"

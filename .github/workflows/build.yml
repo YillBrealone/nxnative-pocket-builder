@@ -2117,6 +2117,156 @@ jobs:
               f.write('## Host source checks\n- Control labels and selected patch markers found; host UI sources scanned for literal Han characters.\n- Not a device test or a guarantee about game text, escaped strings, all resources, or touch behaviour.\n\n')
           PYTHON
 
+      - name: Apply A Short Hike legacy MSAA workaround
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01004890117B2000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        env:
+          DEVICE_INPUT: ${{ inputs.device }}
+          MODE_INPUT: ${{ inputs.build_mode }}
+          CACHE_INPUT: ${{ inputs.shader_cache }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_SHORT_HIKE'
+          """A Short Hike-only legacy MSAA integration. No shader-evidence export."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          TITLE = '01004890117B2000'
+          ENGINE = 'b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14'
+          DEVICE = 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+          EXPECTED = {'dm/gfx/nvn/nvn_mtl_legacy.inc': '351268eb459d0038826f8a20f374001ac4e1b9b497ef73c69f872bf8531b68cb',
+                      'dm/ios/tools/build_ipa.sh': '174019237dd0fd3b4bd92b753ffc1eacc20a9224ec97415cde79a415a4f1af22'}
+          DECISION = '''static unsigned ash_msaa_decide(unsigned requested, int eligible, int supports_requested, int supports_four) {
+              return requested == 8 && eligible && !supports_requested && supports_four ? 4 : requested;
+          }
+          '''
+          HELPER = '''// ASH-MSAA-v1: experimental host-only quality reduction for ONE title.
+          // Never change NVN descriptors, guest allocation sizes, layouts, or getters.
+          ''' + DECISION + '''static NSUInteger ash_msaa_samples(const tex_t *t, int packaged) {
+              unsigned requested = t->d.samples;
+              if (DM_GAME_PROGRAM_ID != 0x01004890117B2000ull || requested != 8) return requested;
+              int eligible = !packaged && !t->has_layout && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE);
+              int s8 = [g_dev supportsTextureSampleCount:8], s4 = [g_dev supportsTextureSampleCount:4];
+              unsigned actual = ash_msaa_decide(requested, eligible, s8, s4);
+              if (!s8) {
+                  static _Atomic unsigned reports;
+                  if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 16)
+                      MLOG("[ASH-MSAA-v1] %s requested=8 actual=%u supports4=%d eligible=%d target=%d ser=%llu; sample-index semantics unverified",
+                           actual == 4 ? "fallback" : "NOT remapped", actual, s4, eligible, t->d.target, (unsigned long long)t->serial);
+              }
+              return actual;
+          }
+          '''
+          SAMPLED_OLD = '''    id<MTLTexture> mt = tex_mtl(t);
+              g_texture_sampled = false;
+              return mt;'''
+          SAMPLED_NEW = '''    id<MTLTexture> mt = tex_mtl(t);
+              if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && t && t->d.samples == 8 && mt && mt.sampleCount == 4) {
+                  static _Atomic unsigned reports;
+                  if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8)
+                      MLOG("[ASH-MSAA-v1] sampled remapped texture ser=%llu: per-sample shader reads are NOT proven safe", (unsigned long long)t->serial);
+              }
+              g_texture_sampled = false;
+              return mt;'''
+          PASS_ANCHOR = '        pass_dims(pd, (NSUInteger)physical_colors, &g_pass.tw, &g_pass.th);'
+          PASS_TRACE = '''        if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && g_pass.samples > 1) {
+                      static _Atomic unsigned reports;
+                      if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8) {
+                          unsigned mismatch = 0;
+                          for (int ai = 0; ai < physical_colors && ai < 8; ai++) {
+                              id<MTLTexture> at = pd.colorAttachments[ai].texture;
+                              mismatch |= at && at.sampleCount != g_pass.samples;
+                          }
+                          mismatch |= dt && dt.sampleCount != g_pass.samples;
+                          mismatch |= stt && stt.sampleCount != g_pass.samples;
+                          MLOG("[ASH-MSAA-v1] pass actual=%u attachment_mismatch=%u", g_pass.samples, mismatch);
+                      }
+                  }
+          '''
+          PSO_ANCHOR = '    d.rasterSampleCount = k->samples ? k->samples : 1;'
+          PSO_TRACE = '''
+              if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && d.rasterSampleCount > 1) {
+                  static _Atomic unsigned reports;
+                  if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8)
+                      MLOG("[ASH-MSAA-v1] pipeline actual=%lu", (unsigned long)d.rasterSampleCount);
+              }'''
+          RESOLVE_ANCHOR = '    if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy'
+          RESOLVE_TRACE = '''
+                  if (DM_GAME_PROGRAM_ID == 0x01004890117B2000ull && c->src->d.samples == 8) {
+                      static _Atomic unsigned reports;
+                      if (atomic_fetch_add_explicit(&reports, 1, memory_order_relaxed) < 8)
+                          MLOG("[ASH-MSAA-v1] resolve actual=%lu->%lu", (unsigned long)s.sampleCount, (unsigned long)d.sampleCount);
+                  }'''
+          HOOK = '    python3 "$IOS_SOURCE/tools/prepare_legacy_resources.py"'
+          PROFILE_GUARD = '''    # Check the actual profile after the builder's provisional-profile creation.
+              ASH_PROGRAM_ID=$(gp program_id)
+              python3 -c 'import sys; sys.exit(0 if sys.argv[1] == "01004890117B2000" and int(sys.argv[2], 16) == 0x01004890117B2000 else "A Short Hike: final profile identity mismatch")' "$GAME" "$ASH_PROGRAM_ID" ||
+                die "A Short Hike final profile guard failed"
+          '''
+          NEW_HOOK = PROFILE_GUARD + HOOK
+
+
+          def replace_once(text, old, new):
+              if text.count(old) != 1:
+                  raise ValueError('A Short Hike: source anchor changed; refusing patch')
+              return text.replace(old, new, 1)
+
+
+          def apply(root, env):
+              for key, value in {'DETECTED_TITLE_ID': TITLE, 'ENGINE_REV': ENGINE,
+                                 'DEVICE_INPUT': DEVICE, 'CACHE_INPUT': 'false',
+                                 'MODE_INPUT': 'Build IPA (Default)'}.items():
+                  if env.get(key) != value:
+                      raise ValueError('A Short Hike: incorrect ' + key + '; no files changed')
+              # DM_GAME is a preliminary workflow hint here, not the final builder profile.
+              # Unprofiled games start as DEFAULT; the NSP builder creates a title-specific
+              # provisional profile later. The packaging hook verifies that final identity.
+              profile = env.get('DM_GAME')
+              if profile not in (TITLE, 'DEFAULT'):
+                  raise ValueError('A Short Hike: unexpected preliminary profile; no files changed')
+              if profile == 'DEFAULT' and (root / 'dm/games' / TITLE).exists():
+                  raise ValueError('A Short Hike: DEFAULT conflicts with an existing title profile; no files changed')
+              originals = {}
+              for name, digest in EXPECTED.items():
+                  data = (root / name).read_bytes()
+                  if hashlib.sha256(data).hexdigest() != digest:
+                      raise ValueError('A Short Hike: unknown or already-patched source: ' + name)
+                  originals[name] = data.decode('utf-8')
+              inc_name, sh_name = EXPECTED
+              inc = originals[inc_name]
+              inc = replace_once(inc, 'static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {',
+                                 HELPER + 'static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {')
+              if inc.count('d.sampleCount = t->d.samples;') != 2:
+                  raise ValueError('A Short Hike: multisample descriptor sites changed')
+              inc = inc.replace('d.sampleCount = t->d.samples;', 'd.sampleCount = ash_msaa_samples(t, packaged);')
+              inc = replace_once(inc, SAMPLED_OLD, SAMPLED_NEW)
+              inc = replace_once(inc, PASS_ANCHOR, PASS_TRACE + PASS_ANCHOR)
+              inc = replace_once(inc, PSO_ANCHOR, PSO_ANCHOR + PSO_TRACE)
+              inc = replace_once(inc, RESOLVE_ANCHOR, RESOLVE_ANCHOR + RESOLVE_TRACE)
+              sh = replace_once(originals[sh_name], HOOK, NEW_HOOK)
+              changes = {inc_name: inc, sh_name: sh}
+              # All guards completed before writing anything.
+              for name, text in changes.items():
+                  (root / name).write_text(text, encoding='utf-8')
+              report = {'test': 'ASH-MSAA-v1', 'workflow_revision': 'main-pocket-integration-v1',
+                        'preliminary_profile': profile, 'title': TITLE, 'engine': ENGINE,
+                        'before': EXPECTED, 'after': {n: hashlib.sha256(t.encode()).hexdigest() for n, t in changes.items()},
+                        'apple_compiled_here': False, 'gameplay_verified': False,
+                        'scope': 'Capability-checked 8-to-4 host-only experiment; GPU-only non-image textures. Guest descriptors/layouts unchanged.',
+                        'unresolved': ['Per-sample shader semantics and readback', 'Tier1 sampler resource limits', 'SIMD shuffle pipeline compilation']}
+              print('A Short Hike: title-scoped legacy MSAA workaround installed. User-confirmed on A12Z; this build still needs device verification.')
+              return report
+
+
+          if __name__ == '__main__':
+              report = apply(Path('.'), os.environ)
+              print(json.dumps(report, sort_keys=True))
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                  f.write('## A Short Hike legacy MSAA workaround\n- Capability-checked 8-to-4 backing samples for eligible textures, this title only.\n- Same renderer code as the user-confirmed A12Z test. This integrated build is not yet device-verified.\n- No shader-source collection/export. Guest layout and shader semantics are not generally proven equivalent.\n')
+          PY_SHORT_HIKE
+
       - name: Pre-build checks and summary
         env:
           DEVICE_INPUT: ${{ inputs.device }}
@@ -2897,6 +3047,47 @@ jobs:
                           '- **Not exercised/verified:** application error argument was not logged during capture.\n')
                   f.write('- **Still required:** iPhone startup, warning-path and gameplay tests. Rendered visuals and full shader coverage are not established.\n')
           PY_DOWNWELL
+
+      - name: Verify A Short Hike iOS workaround before publication
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01004890117B2000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_SHORT_HIKE'
+          """Verify A Short Hike integration identity in an IPA, not gameplay."""
+          import hashlib
+          import os
+          from pathlib import Path
+          import plistlib
+          import zipfile
+
+          MARKERS = (b'[ASH-MSAA-v1] %s requested=8 actual=', b'[ASH-MSAA-v1] pass actual=',
+                     b'[ASH-MSAA-v1] pipeline actual=', b'[ASH-MSAA-v1] resolve actual=',
+                     b'per-sample shader reads are NOT proven safe')
+
+
+          def verify(path):
+              with zipfile.ZipFile(path) as z:
+                  infos = [n for n in z.namelist() if n.startswith('Payload/') and n.count('/') == 2 and n.endswith('.app/Info.plist')]
+                  if len(infos) != 1:
+                      raise ValueError('A Short Hike: expected one app Info.plist')
+                  info = plistlib.loads(z.read(infos[0]))
+                  name = info['CFBundleExecutable']
+                  if not isinstance(name, str) or '/' in name or name in ('.', '..'):
+                      raise ValueError('A Short Hike: invalid executable name')
+                  binary = z.read(infos[0].rsplit('/', 1)[0] + '/' + name)
+                  if not all(marker in binary for marker in MARKERS):
+                      raise ValueError('A Short Hike: MSAA workaround markers missing; refusing publication')
+              return hashlib.sha256(binary).hexdigest()
+
+
+          if __name__ == '__main__':
+              digest = verify(Path(os.environ['RUNNER_TEMP']) / os.environ['IPA_FILENAME'])
+              print('A Short Hike: IPA workaround markers verified. Executable SHA256: ' + digest)
+              print('Packaging identity check only; not proof of A12Z rendering or gameplay.')
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                  f.write('- A Short Hike workaround markers found in the IPA executable. Device verification of this build remains pending.\n')
+          PY_SHORT_HIKE
 
       - name: Report IPA identity, size, hash and RomFS requirements
         if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'

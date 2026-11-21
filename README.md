@@ -10,7 +10,7 @@ Build an unsigned iPhone or iPad IPA from your own Nintendo Switch game files us
 | --- | --- | --- |
 | **NxNative - Generic IPA Builder** | [build.yml](.github/workflows/build.yml) | Normal builds without the experimental advanced controller editor. |
 | **NxNative - Controls Editor Test** | [nxnative-ipa-builder-controls-test.yml](.github/workflows/nxnative-ipa-builder-controls-test.yml) | Testing advanced touch editing on the NX2Apple engine and the added right-stick touch sensitivity setting. |
-| **NxNative - Final Fantasy Disk-Saving Test** | [disk-test.yml](.github/workflows/disk-test.yml) | A separate Final Fantasy disk-saving test path, not the general starting point for other games. |
+
 
 These workflows are not interchangeable snapshots. The main and controller-editor workflows include guarded Final Fantasy cleanup and newer separate-RomFS download handling; the dedicated disk test does not automatically inherit every change. Engine revisions can also differ.
 

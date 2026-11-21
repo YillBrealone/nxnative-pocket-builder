@@ -74,6 +74,12 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 360
 
+    env:
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: ""
+      PYTHONHOME: ""
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Select and verify the reference Xcode toolchain
         shell: bash
@@ -196,6 +202,163 @@ jobs:
               || sudo xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk iphoneos metal --version | head -1
+
+      - name: Check dependencies and bundled shader tools before downloads
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_PREFLIGHT'
+          """Read-only early checks for the four pinned builder variants; no game inputs."""
+          import hashlib
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+
+          # Filled from the reviewed pinned sources by the delivery generator.
+          SOURCE_SETS = {'b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14': {'label': 'Legacy Metal 3 + BC fallback', 'upstream': None, 'files': {'dm/gfx/tools/tool_lock.py': 'ef55d09a97fb00712b9c8b795fc6b36fd5059da3cc058faf77c3dfbf79dcca4c', 'dm/gfx/tools/dmsh_chain.py': '31c47e9dc676bf63060010447816578e9540e2d981beba166a8a6d584ac78014', 'dm/gfx/tools/dmsh_chain.lock': '0e23a2d9f38f103bec9c756bef1227c5d58896f809677c6c88bb01b3fa02a2e8'}}, '20b59b6e59a9b8f060c19cd3894dacf4e5f4d68a': {'label': 'Standard engine', 'upstream': None, 'files': {'dm/gfx/tools/tool_lock.py': '8ef0fa855054a17d7df53a591dcfc6c1adf6d71a6bcf7bf9d90f11df8189a231', 'dm/gfx/tools/dmsh_chain.py': 'b7f5d6fd9d6d064cf75480a2a7099b0261a533f4c844f4500528dea0c5969efc', 'dm/gfx/tools/dmsh_chain.lock': '3c202b29aed97b19646f991d2301162fa97bf54510ff008a260c7f3c1db6bdf8'}}, '3739300556114bcb51937a62c7392464b1196939': {'label': 'NX2Apple regular builder', 'upstream': '94a0944755da1a443f42651bf7ee49ab24ed5ee5', 'files': {'dm/gfx/tools/tool_lock.py': '8ef0fa855054a17d7df53a591dcfc6c1adf6d71a6bcf7bf9d90f11df8189a231', 'dm/gfx/tools/dmsh_chain.py': '3cf5d272feb7c24bbe54eeb1a337107d3b63ee0a8433cd5c6eb89c8c61fe8bc5', 'dm/gfx/tools/dmsh_chain.lock': '936adec476e350cfee6655fbef37c06cc128e359a0354ad50eeb7146e06d7364'}}, '4ab27a53ccb25545fc72dde841320ce5010c399d': {'label': 'NX2Apple Controls Editor', 'upstream': '94a0944755da1a443f42651bf7ee49ab24ed5ee5', 'files': {'dm/gfx/tools/tool_lock.py': '8ef0fa855054a17d7df53a591dcfc6c1adf6d71a6bcf7bf9d90f11df8189a231', 'dm/gfx/tools/dmsh_chain.py': '3cf5d272feb7c24bbe54eeb1a337107d3b63ee0a8433cd5c6eb89c8c61fe8bc5', 'dm/gfx/tools/dmsh_chain.lock': '936adec476e350cfee6655fbef37c06cc128e359a0354ad50eeb7146e06d7364'}}}
+          EXPECTED_XCODE = 'Xcode 27.1'
+          MODULES = ('lz4.block', 'capstone', 'fontTools', 'backports.zstd', 'gdown', 'nsz', 'zbic')
+          DEPENDENCY_CODE = '''import importlib, sys
+          assert sys.version_info >= (3, 12)
+          for name in sys.argv[1:]: importlib.import_module(name)
+          import capstone, lz4.block
+          from backports import zstd
+          assert capstone.__version__.split('.')[0] == '5'
+          cs = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+          assert next(cs.disasm(bytes.fromhex('c0035fd6'), 0)).mnemonic == 'ret'
+          data = b'NXNative dependency smoke test' * 4
+          assert lz4.block.decompress(lz4.block.compress(data)) == data
+          assert zstd.decompress(zstd.compress(data)) == data
+          '''
+          TOOL_CODE = '''import sys, json, subprocess
+          sys.path.insert(0, sys.argv[1])
+          import tool_lock
+          subprocess.run([tool_lock.SPIRV_CROSS, '--revision'], check=True, capture_output=True, timeout=30)
+          print(json.dumps({'actual': tool_lock.tools_now(), 'source': tool_lock.xlate_source_sha()}))
+          '''
+
+
+          def command(argv, label, *, cwd=None, timeout=45):
+              try:
+                  result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+              except (OSError, subprocess.SubprocessError) as error:
+                  raise ValueError(label + ' could not complete (' + type(error).__name__ + '). See TROUBLESHOOTING.md.') from None
+              if result.returncode:
+                  # Do not echo arbitrary child output/environment or secrets into Actions.
+                  raise ValueError(label + ' failed (exit ' + str(result.returncode) + '). See TROUBLESHOOTING.md.')
+              return result.stdout.strip()
+
+
+          def parse_lock(text):
+              result = {}
+              for line in text.splitlines():
+                  if not line or line.startswith('#'): continue
+                  key, sep, value = line.partition('\t')
+                  if not sep or key in result or not value:
+                      raise ValueError('Invalid or duplicate shader lock record')
+                  result[key] = value
+              return result
+
+
+          def validate_tools(want, actual, source):
+              if set(actual) != set(want):
+                  raise ValueError('Shader-tool fingerprint inventory differs from the reviewed lock')
+              for key in want:
+                  if key.startswith('metal_'):
+                      if not isinstance(actual[key], str) or not actual[key].startswith('Apple metal version '):
+                          raise ValueError('Metal compiler unavailable: ' + key)
+                  elif actual[key] != want[key]:
+                      raise ValueError('Bundled shader tool failed its committed fingerprint check: ' + key)
+              if actual.get('xlate_source') != source:
+                  raise ValueError('Translator embedded source does not match repository source')
+              return all(actual[k] == want[k] for k in ('metal_macosx', 'metal_iphoneos'))
+
+
+          def verify_source(root, spec):
+              snapshots = {}
+              for name, expected in spec['files'].items():
+                  p = root / name
+                  if not p.is_file() or p.is_symlink():
+                      raise ValueError('Missing or symbolic shader-tool input: ' + name)
+                  data = p.read_bytes()
+                  if hashlib.sha256(data).hexdigest() != expected:
+                      raise ValueError('Shader-tool source/lock differs from the pinned revision: ' + name)
+                  snapshots[name] = data
+              return snapshots
+
+
+          def preflight(root, env):
+              revision = env.get('ENGINE_REV', '')
+              if revision not in SOURCE_SETS:
+                  raise ValueError('Unknown engine revision; review the preflight inventory before changing engine pins')
+              spec = SOURCE_SETS[revision]
+              if spec.get('upstream') and env.get('NX2_UPSTREAM_PIN') != spec['upstream']:
+                  raise ValueError('NX2Apple upstream pin differs from the reviewed revision')
+              if sys.version_info < (3, 12): raise ValueError('Python 3.12 or newer is required')
+              before = verify_source(root, spec)
+              version = command(['xcodebuild', '-version'], 'Xcode selection').splitlines()
+              if not version or version[0] != EXPECTED_XCODE:
+                  raise ValueError('This delivery retains the reference Xcode 27.1 requirement')
+              runtimes = command(['dotnet', '--list-runtimes'], '.NET runtime')
+              if not re.search(r'^Microsoft\.NETCore\.App 10\.', runtimes, re.M):
+                  raise ValueError('.NET 10 runtime is missing')
+              for name in ('xcodegen', 'zstd', 'glslangValidator', 'unar', 'gdown', 'nsz'):
+                  if shutil.which(name) is None: raise ValueError('Required command is missing: ' + name)
+              for name in ('xcodegen', 'zstd', 'glslangValidator'):
+                  command([name, '--version'], name + ' smoke check')
+              # Isolated interpreter, empty scratch cwd; no game files/keys needed or printed.
+              with tempfile.TemporaryDirectory(prefix='nxnative-smoke-', dir=env['RUNNER_TEMP']) as td:
+                  command([sys.executable, '-I', '-B', '-c', DEPENDENCY_CODE, *MODULES],
+                          'Python package/native-library smoke check', cwd=td, timeout=90)
+              for sdk in ('macosx', 'iphoneos'):
+                  command(['xcrun', '--sdk', sdk, '--show-sdk-path'], sdk + ' SDK')
+                  text = command(['xcrun', '--sdk', sdk, 'metal', '--version'], sdk + ' Metal compiler')
+                  if not text.startswith('Apple metal version '): raise ValueError('Unrecognized Metal version output: ' + sdk)
+              tools = root / 'dm/gfx/tools'
+              response = command([sys.executable, '-I', '-B', '-c', TOOL_CODE, str(tools.resolve())],
+                                 'Bundled translator/SPIRV-Cross check', timeout=150)
+              try:
+                  data = json.loads(response)
+                  want = parse_lock(before['dm/gfx/tools/dmsh_chain.lock'].decode())
+                  recorded_metal = validate_tools(want, data['actual'], data['source'])
+              except (KeyError, TypeError, json.JSONDecodeError):
+                  raise ValueError('Invalid shader-tool check response') from None
+              if verify_source(root, spec) != before:
+                  raise ValueError('Shader-tool inputs changed during the read-only check')
+              # Do not run --update-lock/--header here, and do not import own_compilers:
+              # upstream lock compiler strings can differ from the existing 27.1 CI policy.
+              report = {'schema': 1, 'engine_revision': revision, 'variant': spec['label'],
+                        'python': '.'.join(map(str, sys.version_info[:3])), 'xcode': version[0],
+                        'python_smoke_passed': True, 'both_metal_sdks_available': True,
+                        'bundled_nonmetal_fingerprints_verified': True,
+                        'translator_source_verified': True, 'source_files_changed': False,
+                        'metal_matches_committed_lock': recorded_metal,
+                        'compiler_policy': 'Existing strict Xcode 27.1 selection and later lock/header preparation retained; no new compiler override.',
+                        'device_compatibility_verified': False}
+              return report
+
+
+          if __name__ == '__main__':
+              try:
+                  report = preflight(Path.cwd(), os.environ)
+                  print('Early dependency and bundled shader-tool checks passed; no game data required.')
+                  if not report['metal_matches_committed_lock']:
+                      print('Note: selected Xcode 27.1 Metal differs from the committed upstream lock. Existing later lock/header preparation remains unchanged; this is not proof of upstream compiler equivalence.')
+                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                      f.write('## Early build checks\n- Python imports, compression round-trips and ARM64 disassembly smoke check passed.\n- .NET 10, utility probes and macOS/iPhoneOS Metal SDK checks passed.\n- Bundled translator/SPIRV-Cross fingerprints and translator source verified before downloads; no source or lock rewritten by this step.\n')
+                      f.write('- Metal matches the committed upstream lock: **' + ('yes' if report['metal_matches_committed_lock'] else 'no; existing strict Xcode 27.1 CI policy retained') + '**.\n')
+                      f.write('- Build checks are not a device/gameplay compatibility test.\n')
+              except ValueError as error:
+                  print('::error::Early build check: ' + str(error))
+                  raise SystemExit(1)
+          PY_PREFLIGHT
 
       - name: Download game files and keys
         env:
@@ -2827,8 +2990,16 @@ jobs:
             KEYS_ARGS=(-k "$WORK/prod.keys")
           fi
 
+          SURVEY_HELP="$(python scripts/build_ipa_from_nsp.py --help 2>&1 || true)"
           SURVEY_ARGS=(--survey-only)
-          if python scripts/build_ipa_from_nsp.py --help 2>&1 | grep -q -- "--provisional"; then
+          # Use upstream stage/count output, not a custom parser or synthetic percentage.
+          if grep -Eq -- '--progress[[:space:]]+[{][^}]*lines[,}]' <<< "$SURVEY_HELP"; then
+            SURVEY_ARGS+=(--progress lines)
+            echo "Build progress: upstream stage/count lines enabled."
+          else
+            echo "Build progress: engine does not advertise line mode; retaining its default output."
+          fi
+          if grep -q -- "--provisional" <<< "$SURVEY_HELP"; then
             SURVEY_ARGS+=(--provisional)
           fi
 
@@ -3101,6 +3272,13 @@ jobs:
           HELP_TEXT="$(python scripts/build_ipa_from_nsp.py --help 2>&1 || true)"
 
           BUILD_ARGS=("$GAME_DIR" -o "$OUTPUT")
+          # Use upstream stage/count output, not a custom parser or synthetic percentage.
+          if grep -Eq -- '--progress[[:space:]]+[{][^}]*lines[,}]' <<< "$HELP_TEXT"; then
+            BUILD_ARGS+=(--progress lines)
+            echo "Build progress: upstream stage/count lines enabled."
+          else
+            echo "Build progress: engine does not advertise line mode; retaining its default output."
+          fi
           if [[ -s "$WORK/prod.keys" ]]; then
             BUILD_ARGS+=(-k "$WORK/prod.keys")
           fi
@@ -3386,6 +3564,13 @@ jobs:
           HELP_TEXT="$(python scripts/build_ipa_from_nsp.py --help 2>&1 || true)"
 
           BUILD_ARGS=("$GAME_DIR" -o "$OUTPUT")
+          # Use upstream stage/count output, not a custom parser or synthetic percentage.
+          if grep -Eq -- '--progress[[:space:]]+[{][^}]*lines[,}]' <<< "$HELP_TEXT"; then
+            BUILD_ARGS+=(--progress lines)
+            echo "Build progress: upstream stage/count lines enabled."
+          else
+            echo "Build progress: engine does not advertise line mode; retaining its default output."
+          fi
           if [[ -s "$WORK/prod.keys" ]]; then
             BUILD_ARGS+=(-k "$WORK/prod.keys")
           fi

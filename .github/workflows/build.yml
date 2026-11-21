@@ -116,7 +116,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: seedds/nxnative
-          ref: main
+          # Match the audited standard-engine revision required by the early checks.
+          ref: 20b59b6e59a9b8f060c19cd3894dacf4e5f4d68a
 
       - name: Checkout Metal 3 + BC fallback version (2020 iPad Pro / iPhone 15 or older)
         if: inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'

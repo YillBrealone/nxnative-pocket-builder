@@ -1,153 +1,91 @@
-# Troubleshooting
+# Troubleshooting — regular and Controls Editor builds
 
-[Back to README](README.md)
+Applies to both Main and Pocket, with any of the three engine selections. Always start with the **first red step**, not later steps marked skipped. A completed workflow or IPA download does not prove game compatibility.
 
-Start with the **first failed step** in the Actions run, not just the final summary. A successful survey or IPA build does not guarantee gameplay.
+## 1. New early-check step fails
 
-Before sharing logs or screenshots, remove game links, keys links, tokens and private information. Never share `prod.keys`. Redaction is best effort; review even the `NxNative-Build-Logs` artifact.
+Step: **Check dependencies and bundled shader tools before downloads**.
 
-## The workflow is missing or will not start
+This step runs before game downloads. A failure here is not evidence that your game dump, keys or device is incompatible.
 
-- Enable GitHub Actions in your own repository/fork.
-- Check that the workflow is under `.github/workflows/` on the default branch.
-- Choose the intended Actions entry: Generic IPA Builder, Controls Editor Test or Final Fantasy Disk-Saving Test.
-- Check the selected branch and your permissions.
-- On iPad, try Safari's Request Desktop Website or another browser/device if the Run workflow popup fails.
+| Message or area | Meaning and next action |
+|---|---|
+| Unknown engine revision / NX2Apple upstream pin differs | The checkout/pin no longer matches this delivery. Restore the matching full workflow or have the new source reviewed. Do not change expected hashes to force a pass. |
+| Missing/symbolic shader-tool input / source or lock differs | A required checker, chain source or committed lock is absent/changed. Check whether the workflow or engine was manually edited. Use the pinned revision; do not regenerate fingerprints to bypass this early check. |
+| Python package/native-library smoke check failed | An import or native operation failed. Check the preceding **Install dependencies** log. Tested imports are `lz4.block`, `capstone`, `fontTools`, `backports.zstd`, `gdown`, `nsz`, `zbic`; Capstone must be major 5. The test also exercises ARM64 disassembly and LZ4/Zstd round trips. This failure does not request game keys. |
+| .NET 10 runtime is missing | Review **Set up .NET**. An SDK/runtime for an unrelated version or architecture may not run the translator. Do not remove the runtime check just because `dotnet` exists. |
+| Required command is missing | Review the dependency-install step. Commands checked include xcodegen, zstd, glslangValidator, unar, gdown and nsz. |
+| Xcode 27.1 requirement | This delivery intentionally retains the existing reference toolchain. Do not substitute 27.2/latest or use `--allow-other-metal` as a blind workaround. Share the Xcode-selection output for review. |
+| macOS/iPhoneOS SDK or Metal probe failed | The selected SDK/component is missing, unusable or timed out. The existing install step already attempts Metal-component installation. Review its output and which Xcode was selected. |
+| Bundled translator/SPIRV-Cross check failed | A bundled executable could not run, timed out, or the checker failed. Check the selected engine/revision and runtime setup. Do not replace the bundled compiler with a random Homebrew copy. |
+| Bundled shader tool failed its committed fingerprint check | A translator binary, SPIRV-Cross or embedded source fingerprint does not match the committed lock. A fresh download/review of the pinned source is appropriate; a shader-cache toggle does not repair the source. |
+| Translator embedded source does not match repository source | Translator/source versions do not agree. Keep translator and source together. Do not relabel shader chains. |
+| Invalid shader-tool response/inventory | The checker API or lock structure differs from what was reviewed. Treat it as a source review requirement. |
+| Inputs changed during the read-only check | Files changed while checks ran. Investigate the checkout/runner; do not bypass the check. |
+| Probe timeout | The child tool did not finish in its allotted time. The early step itself has a ten-minute limit. A fresh run can help a transient runner issue; repeated timeouts need investigation. |
 
-**Re-run jobs uses the original run's workflow definition.** After committing an updated workflow, start a new run to use it.
+**Note rather than failure:** “selected Xcode 27.1 Metal differs from the committed upstream lock” reports an existing difference. The selected compiler is still required to run, and strict Xcode 27.1 selection remains enforced. The new check does not establish compiler equivalence or rewrite the lock. The workflow's pre-existing later lock/header preparation and shader-chain checks are retained. Do not change Xcode/lock policy just to hide this note.
 
-## A download or extraction fails
+The early step suppresses arbitrary subprocess output to avoid dumping environment details. Send its exact labeled error plus the relevant earlier setup step—not keys or secret values.
 
-- Confirm the upload has finished and the runner can access it without an interactive login, CAPTCHA or browser-only confirmation.
-- A direct URL must download the file, not an HTML sharing page.
-- A supported Google Drive folder must expose the intended packages.
-- For Switch 1 packages, check the `Keys_URL` repository secret and that it points to your own appropriate keys file.
-- Check the archive is complete and contains supported packages for the same game.
+## 2. Game download fails
 
-A download, keys or extraction error does not prove game incompatibility. Never paste private URLs into issues.
+Step: **Download game files and keys**.
 
-## An update or DLC is missing
+The downloader is unchanged by this update. Game and key downloads run in parallel; nearby lines can describe different downloads. “Finished downloading prod.keys” does not mean the game download succeeded.
 
-Supply the matching update and DLC packages when building. Supported Drive folders can contain multiple packages.
+For a Google Drive game-download failure:
 
-When a base game URL is entered in the run form, the form's update/DLC fields are used instead of old update/DLC secrets. Blank fields do not automatically bring those secrets back in.
+- Check that the game file/link still exists and that it is accessible to the runner without an interactive login.
+- Check permissions, download quota and any warning/interstitial page.
+- For a game dump you are authorized to use, try a supported direct file URL if Drive refuses automated downloads.
+- “No UPDATE_URL configured” / “No DLC_URL configured” are informational when those inputs were intentionally blank.
 
-The separate base/update RomFS image is not a complete DLC package. DLC handling remains engine-dependent. Switch 2 `.nup` support does not establish that combining separate base/update/DLC packages works.
+Do not post `prod.keys`, key values or private key-download links. Do not make your keys public to debug a download. Store sensitive links in repository secrets where supported; workflow input fields and logs are not a privacy guarantee.
 
-## Title ID or profile errors
+A failed download occurs before extraction/compilation and says nothing about Naruto or another game's runtime support. This update adds no new downloader categories or exit-code scheme.
 
-Include the complete base game. Leave `profile_id` blank for automatic detection unless you know the correct override. Do not select another game's profile merely to get past an error.
+## 3. A Short Hike / Downwell guards fail
 
-A profile directory or README is not certification that the game works. A provisional profile means the engine is attempting an unverified configuration, not that the game is definitely incompatible or definitely supported.
+- Choose the legacy **iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)** engine for the targeted workaround.
+- Use **Build IPA**, with **shader cache OFF**.
+- Leave A Short Hike's profile override blank. A preliminary `DM_GAME=DEFAULT` is normal when no built-in profile exists; the corrected integration handles it and checks the final profile later.
+- An unknown source hash means the patch cannot be applied safely. Do not change the hash or remove the guard blindly.
+- A missing workaround marker in the IPA stops publication deliberately; do not install an IPA as a verified workaround if that check failed.
 
-## Should I run Survey Only first?
+No shader-export checkbox or diagnostic `env.txt` changes are required for the integrated workarounds. Modern-engine builds and other titles skip these title-specific steps.
 
-It is a useful first step for an unconfirmed title. It does not create an IPA or test the game on your iPhone/iPad. Passing cannot confirm graphics, sound, saving or stability.
+## 4. Progress looks quiet or different
 
-The “2-min” label is not a total-runtime promise. Downloads and setup add time. After reviewing the survey, start a new **Build IPA** run; do not assume the temporary survey data persists into it.
+The workflow selects upstream `--progress lines` only when advertised in the builder's help. It keeps the default output otherwise.
 
-If the survey fails, distinguish input/download errors from engine analysis errors before drawing conclusions about compatibility.
+Stage/count updates come from the engine. Some work cannot be measured, and a single shader/compiler task can stay on one stage for a while. No percentage should be interpreted as proof that a hang is impossible. The output-mode change does not suppress nonzero exits or alter the existing job timeout.
 
-## Which engine should an M-series iPad use?
+Separate RomFS has two build passes: staging pauses intentionally for the existing image upload, then the final build resumes. An intentional staging pause is not necessarily a failure.
 
-For a supported M-series iPad, such as iPad Air M2, NX2Apple is the default starting point, subject to the selected revision's OS requirements. Its iPhone-focused option label does not exclude supported iPads. Standard is an alternative upstream path.
+## 5. IPA missing or publishing blocked
 
-Do not select older-device BC fallback simply because its label mentions iPad. Do not select NX2Apple on an unsupported older device just to obtain the editor. See the engine requirements linked in the README.
+Open the first failed build, game-specific verification or IPA-inspection step. Later upload steps being skipped is normally a consequence, not the root cause.
 
-## Shader compilation fails or reports a chain mismatch
+The existing IPA checks can reject missing output, invalid ZIP/plist metadata, missing game-fix markers, credential-like filenames or host UI audit failures. Do not bypass those checks to obtain a download. GoFile and GitHub fallback behavior are unchanged; GitHub artifacts may require sign-in/access.
 
-Capture the first error, engine revision and expected/actual shader identifiers from the redacted logs. Keep the game/update versions and cache setting in your report.
+## 6. IPA builds but the game crashes or renders incorrectly
 
-**Do not rename shader libraries, copy unrelated chain headers, force a version identifier or bypass validation.** The runtime and generated shaders must agree. If an early check stops the job, that is a safeguard, not an instruction to suppress it.
+This update changes build checks/output only. It does not add game compatibility, increase FPS or alter textures/memory/ASTC/MSAA behavior.
 
-Main and Controls Editor Test pin the older-device engine and include early chain checks. The separate disk-test workflow is a different snapshot; do not assume it has identical revisions or checks.
+Send the new device result and guest log, along with the run link, engine selection and device/OS/LiveContainer details if they are not already known. For the known iPad, there is no need to repeat the previously supplied original A Short Hike crash log; a new result needs its new log. A successful early check or marker check is not a GPU/gameplay test.
 
-Only enable shader cache deliberately. It is off by default; cache reuse is not guaranteed and game-derived cache data may be accessible in a public repository. A warning about an unreadable shader is not by itself a diagnosis of a later crash.
+## Sharing useful evidence safely
 
-## The runner runs out of disk space
+Send:
 
-Large games can need much more space than the compressed input: downloaded packages, extraction, shader intermediates and IPA packaging coexist. Separate mode reduces bundled IPA size but does not eliminate all runner storage requirements.
+1. The workflow run/job link and selected branch/engine.
+2. The first failed step's name and final error/traceback lines.
+3. The relevant setup output if the error is in the early check.
+4. Existing redacted build logs, if generated, after reviewing them yourself.
 
-Main and Controls Editor Test contain guarded cleanup for Final Fantasy title `0100606026F12000` on their audited NX2Apple paths. It is not a universal cleanup for all titles or engines. Unknown script revisions are rejected rather than deleting unchecked paths. Shader intermediate cleanup is conditional, including cache-disabled requirements.
+If logs require authentication, upload a reviewed log file or provide a temporary direct log link. Never include key files, key values, full private environment dumps, private package links or unreviewed raw logs. Do not rerun the old commit after uploading a corrected YAML: commit the new file and use **Run workflow** for a fresh run.
 
-The dedicated Final Fantasy Disk-Saving Test remains a separate test workflow. Do not assume it includes every newer main/controller fix. Do not add broad deletion commands while shader compilation or packaging still needs the files.
+## Rollback
 
-## The IPA or RomFS download is missing or expired
-
-- Survey Only never creates an IPA.
-- Check whether the job reached the relevant upload step.
-- An early RomFS artifact does not prove the later IPA build succeeded.
-- IPA and separate RomFS GitHub artifacts are retained for **one day**. Download the ZIP and extract it.
-- GoFile uploads request and confirm approximately **five-hour folder expiry**; check the summary for the actual expiry and whether the upload succeeded.
-- Main and Controls Editor Test attempt separate RomFS GoFile uploads; the dedicated disk test currently only provides its GitHub RomFS artifact.
-- Separate RomFS uploads happen before shaders; their GoFile link may expire before a long build ends. Use the GitHub fallback while available.
-- If GoFile is disabled with the repository variable `GOFILE_UPLOAD=false`, use GitHub artifacts. Disabling GoFile does not disable artifact uploads.
-- GitHub can require sign-in and appropriate repository access for artifact downloads. An expired link does not restore the file; you may need a fresh run.
-
-GoFile pages are not guaranteed direct file URLs. Public-repository artifacts and GoFile links are not private storage. Expiry cannot revoke downloaded copies. Build-log artifacts are retained for seven days; Actions console-log retention is separate.
-
-## Where do I put separate RomFS?
-
-Use the image and IPA from the **same run**. Extract the RomFS artifact ZIP if necessary and name the image exactly `romfs.img`, not `romfs.img.zip` or `romfs.img.img`.
-
-For engines supporting this handoff, put it at **the game's own `Documents/romfs.img`**. With LiveContainer, this means the imported game's data container, not merely LiveContainer's outer Documents directory. How you access that container depends on your LiveContainer/sideloading setup.
-
-Do not substitute an image from another game, update or unrelated run. DLC remains a separate engine concern. Bundle mode does not produce a separate RomFS download and normally does not require this placement step.
-
-## The IPA installs but black-screens, crashes or has graphical errors
-
-Check:
-
-1. Exact device and OS against the selected engine's requirements.
-2. Whether the installation/signing method supports this IPA.
-3. Game and update version, engine revision and any upstream game notes.
-4. For separate mode, the correct image, filename and game data container.
-5. Whether failure occurs immediately, after a menu, during loading or during gameplay.
-
-An unsigned IPA must be handled by an appropriate signing/container method. Successful packaging does not prove launchability. A provisional profile may still need game-specific work, and older-device/Switch 2 paths are experimental.
-
-Do not infer from a black screen alone that the cause is memory, shaders, keys or signing. Do not install unrelated quick patches or diagnostic environment flags as a blanket fix. Keep the original logs and back up saves before testing changes.
-
-## The advanced controller editor is missing
-
-Check both the **workflow** and **engine**:
-
-- Use **NxNative - Controls Editor Test**.
-- Select **NX2Apple Patched**.
-- Select **2D or 3D** in Control Mode, then open **Controls > Edit Control Layout**.
-- Tap and Trackpad do not offer this editor.
-
-Standard and the older-device engine do not currently have the advanced editor. They retain existing overall control-size/left-stick placement settings and the controller workflow's source-adapted right-stick sensitivity, but not the advanced drag/per-button resize/opacity/split-ABXY/custom-layout editor. This is a missing port, not a hidden setting.
-
-The updated NX2Apple editor has readability changes intended to reduce wrapped button text and adapt card width. These source changes have not been verified in a new complete iOS build/device test.
-
-## Combo buttons or saved layouts behave differently than expected
-
-Combo buttons are **hold-only**: selected buttons remain pressed while your finger is down and release when you lift it. Toggle and Turbo are deliberately not offered. There is no new tap-to-hold or show/hide feature.
-
-Use Done to save editor changes; Cancel discards the current edit session. Layouts are stored in the game's app preferences, not a guaranteed cross-device export. Changing underlying environment layout/size settings can reset saved layout/size edits. Reinstalling into a new app container can also lose preferences; back up saves and data first.
-
-The right-stick sensitivity setting changes virtual touch-stick gain, not physical-controller sensitivity.
-
-## Tap or Trackpad does not provide enough controls
-
-Tap sends touchscreen input where supported; not every game uses a touchscreen. Trackpad uses dragging for the left stick and a short tap for A. It is not a complete substitute for all gamepad buttons, and it does not gain editable overlay combo buttons from the NX2Apple editor.
-
-Try 2D/3D controls or a supported physical controller if the game needs additional buttons. Tap/Trackpad are intended for Handheld mode. Their behaviour has not been verified for every game/device.
-
-## Rebuild without losing saves
-
-Back up saves and game data before replacing an IPA. Updates and DLC generally require rebuilding. With LiveContainer, preserve the correct existing app identity and data container when appropriate; installing as a new entry can leave saves in the old container. Backup and save compatibility are not guaranteed by a successful build.
-
-## Asking for help
-
-Include:
-
-- Workflow name and the run's workflow/engine revision, if available.
-- Device and OS version.
-- Game and update version; title ID if known.
-- Engine, bundle/separate mode and shader-cache setting.
-- First failed step and relevant redacted error lines, or the exact runtime failure point.
-- Whether an IPA was built and how it was installed.
-
-Do not include keys, private links, tokens, game packages, RomFS images or unreviewed logs.
+Use the preceding branch-matched files from `short-hike-integration.zip`, or restore the previous commit of each workflow. The working Downwell/A Short Hike test branches are unchanged. No branch merge or extra permanent branch is needed.

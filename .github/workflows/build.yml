@@ -360,6 +360,80 @@ jobs:
                   raise SystemExit(1)
           PY_PREFLIGHT
 
+      - name: Record dependency versions for future tested locks
+        id: build_environment
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_REVIEW'
+          """Version-only inventory; never export pip URLs, paths, keys or the environment."""
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import re
+          import subprocess
+          import sys
+
+          def probe(argv):
+              try:
+                  result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False)
+                  return result.stdout.strip() if result.returncode == 0 else ''
+              except (OSError, subprocess.SubprocessError):
+                  return ''
+
+          def version(value):
+              return value if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+!() -]{0,159}', value) else 'unavailable'
+
+          def revision(name):
+              value = os.environ.get(name, '')
+              return value if re.fullmatch(r'[0-9a-f]{40}', value) else 'unavailable'
+
+          def number(name):
+              value = os.environ.get(name, '')
+              return value if re.fullmatch(r'[0-9]{1,30}', value) else 'unavailable'
+
+          packages = {}
+          for dist in importlib.metadata.distributions():
+              name = dist.metadata.get('Name', '')
+              if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', name):
+                  packages[name] = version(dist.version)
+          brew = {}
+          for line in probe(['brew', 'list', '--formula', '--versions']).splitlines():
+              fields = line.split()
+              if len(fields) >= 2 and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9@+._-]{0,127}', fields[0]):
+                  brew[fields[0]] = [version(v) for v in fields[1:]]
+          xcode = probe(['xcodebuild', '-version']).splitlines()
+          metal_output = probe(['xcrun', '-sdk', 'iphoneos', 'metal', '--version'])
+          metal = re.search(r'\b(\d+(?:\.\d+){1,4}(?:\.\d+)?)\b', metal_output)
+          record = {
+              'schema': 1,
+              'purpose': 'Observed build environment, not a tested dependency lock or proof of build success.',
+              'run_id': number('GITHUB_RUN_ID'),
+              'run_attempt': number('GITHUB_RUN_ATTEMPT'),
+              'workflow_revision': revision('WORKFLOW_REV'),
+              'engine_revision': revision('ENGINE_REV'),
+              'nx2_engine_revision': revision('NX2_ENGINE_REV'),
+              'nx2_upstream_pin': revision('NX2_UPSTREAM_PIN'),
+              'python': version(platform.python_version()),
+              'macos': version(platform.mac_ver()[0]),
+              'architecture': version(platform.machine()),
+              'xcode': [version(line) for line in xcode[:2]],
+              'iphoneos_sdk': version(probe(['xcrun', '--sdk', 'iphoneos', '--show-sdk-version'])),
+              'metal_version': metal.group(1) if metal else 'unavailable',
+              'dotnet_sdk': version(probe(['dotnet', '--version'])),
+              'python_packages': dict(sorted(packages.items())),
+              'homebrew_formulae': dict(sorted(brew.items())),
+          }
+          path = Path(os.environ['RUNNER_TEMP']) / 'nxnative-build-environment.json'
+          path.write_text(json.dumps(record, indent=2, sort_keys=True)+'\n', encoding='utf-8')
+          print('Recorded version-only build environment; check the final Actions result before treating this run as successful.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('\n## Build environment\nThe NxNative-Build-Environment artifact records tool/package versions (one-day retention). It is not a dependency lock or a build-success certificate. Save it alongside a successful full-build run before proposing dependency pins.\n')
+          PY_REVIEW
+
       - name: Download game files and keys
         env:
           INPUT_GAME_URL: ${{ inputs.game_url }}
@@ -686,21 +760,42 @@ jobs:
                       f"Invalid {suffix} package signature: {path.name}"
                   )
 
+          def package_sha256(path):
+              # Stream only on filename/size collisions; do not load large packages into RAM.
+              import hashlib
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.digest()
+
           def add_package(source, label):
-              target = game_dir / source.name
-
-              if target.exists():
-                  if target.stat().st_size == source.stat().st_size:
-                      print(
-                          f"Skipping duplicate package ({label}): {target.name} "
-                          f"({target.stat().st_size:,} bytes)"
-                      )
-                      return
-                  target = game_dir / f"{label}_{source.name}"
-
+              # Validate even when a file looks like a duplicate.
               validate_package(source)
-              shutil.move(str(source), str(target))
+              target = game_dir / source.name
+              incoming_hash = None
+              for candidate in (target, game_dir / f"{label}_{source.name}"):
+                  if not candidate.exists() and not candidate.is_symlink():
+                      target = candidate
+                      break
+                  if not candidate.is_file() or candidate.is_symlink():
+                      raise SystemExit("Package filename conflict: destination is not a regular file. Rename the incoming package and retry.")
+                  if candidate.stat().st_size == source.stat().st_size:
+                      if incoming_hash is None:
+                          incoming_hash = package_sha256(source)
+                      if package_sha256(candidate) == incoming_hash:
+                          print(
+                              f"Skipping content-verified duplicate package ({label}): {candidate.name} "
+                              f"({candidate.stat().st_size:,} bytes)"
+                          )
+                          return
+              else:
+                  raise SystemExit(
+                      "Package filename conflict: both the original and label-prefixed names "
+                      "contain different data. Rename the incoming package and retry; no existing package was overwritten."
+                  )
 
+              shutil.move(str(source), str(target))
               print(
                   f"Added {label}: {target.name} "
                   f"({target.stat().st_size:,} bytes)"
@@ -2715,6 +2810,59 @@ jobs:
               unittest.main(argv=[sys.argv[0]],verbosity=2)
           POCKET_PY
 
+      - name: Explain experimental and game-dependent settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_REVIEW'
+          """Presentation-only annotations, applied AFTER guarded Pocket source checks."""
+          from pathlib import Path
+
+          NOTES = {
+              'DM_RENDER_SCALE': ('Render scale (experimental)', 'Effect depends on the game and renderer; internal resolution may not change. Restart before comparing. Lower values do not guarantee less heat or higher FPS.'),
+              'DM_DYNAMIC_RESOLUTION': ('Dynamic resolution (game-dependent)', 'Requires game support. A visible toggle may have no effect. Restart before comparing; leave off if the game is already smooth.'),
+              'DM_FRAMEGEN': ('Frame generation (experimental)', 'Game and renderer support varies. Interpolated pictures do not increase game simulation speed; artifacts and extra GPU work are possible. Restart before comparing.'),
+              'DM_FPS_TARGET': (None, 'A target is not a performance guarantee. Higher values may affect game speed and heat. Restart before comparing; use the working default first.'),
+          }
+
+          def annotate(text):
+              rows = []
+              seen = set()
+              for line in text.splitlines():
+                  parts = line.split('\t')
+                  key = parts[0]
+                  if key in NOTES:
+                      if key in seen or len(parts) < 8:
+                          raise ValueError('Settings guidance: duplicate or malformed row for '+key)
+                      seen.add(key)
+                      label, note = NOTES[key]
+                      if label is not None:
+                          parts[6] = label
+                      # Preserve engine-specific advice as well as our caution. Idempotent.
+                      if note not in parts[7]:
+                          # Remove the old generic guarantee, not engine-specific details.
+                          parts[7] = parts[7].replace('Lowers resolution to keep the device cool and save battery.', '').strip()
+                          parts[7] = (note+' '+parts[7]).strip()
+                      line = '\t'.join(parts)
+                  rows.append(line)
+              if not {'DM_RENDER_SCALE', 'DM_DYNAMIC_RESOLUTION'}.issubset(seen):
+                  raise ValueError('Settings guidance: expected display settings were not found')
+              return '\n'.join(rows)+'\n'
+
+          path = Path('dm/games/settings.tsv')
+          original = path.read_text(encoding='utf-8')
+          updated = annotate(original)
+          # Never change options, defaults, visibility, groups or metadata.
+          before, after = original.splitlines(), updated.splitlines()
+          assert len(before) == len(after)
+          for old, new in zip(before, after):
+              a, b = old.split('\t'), new.split('\t')
+              assert len(a) == len(b)
+              assert all(x == y for i, (x, y) in enumerate(zip(a, b)) if i not in (6, 7))
+          path.write_text(updated, encoding='utf-8')
+          print('Added English settings support notes; defaults, gates, renderer and game fixes are unchanged.')
+          PY_REVIEW
+
       - name: Verify host UI and applied source patches
         shell: bash
         run: |
@@ -4035,7 +4183,17 @@ jobs:
           name: NxNative-Build-Logs
           path: ${{ runner.temp }}/nxnative-redacted-logs/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
+
+      - name: Upload version-only build environment
+        if: always() && steps.build_environment.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: NxNative-Build-Environment
+          path: ${{ runner.temp }}/nxnative-build-environment.json
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: Report failure troubleshooting
         if: failure()
@@ -4055,5 +4213,6 @@ jobs:
           rm -rf \
             "$RUNNER_TEMP/nxnative" \
             "$RUNNER_TEMP/GameFiles" \
-            "$RUNNER_TEMP/nxnative-redacted-logs"
+            "$RUNNER_TEMP/nxnative-redacted-logs" \
+            "$RUNNER_TEMP/nxnative-build-environment.json"
 

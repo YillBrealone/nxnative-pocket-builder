@@ -181,16 +181,68 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      - name: Prepare isolated Python download cache
+        id: python_cache_key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_CACHE'
+          import hashlib
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import sys
+          import sysconfig
+
+          # Same requirements as the existing installation, not newly chosen version pins.
+          REQUIREMENTS = 'lz4\ncapstone>=5,<6\nfonttools\nbackports.zstd\ngdown\nnsz\nzbic\n'
+          root = Path(os.environ['RUNNER_TEMP'])
+          (root / 'nxnative-python-requirements.txt').write_text(REQUIREMENTS, encoding='utf-8')
+          identity = {
+              'schema': 1, 'requirements': REQUIREMENTS,
+              'python': sys.version, 'pip': importlib.metadata.version('pip'),
+              'platform': sysconfig.get_platform(), 'macos': platform.mac_ver()[0],
+              'architecture': platform.machine(),
+              'workflow_revision': os.environ.get('WORKFLOW_REV', 'unknown'),
+          }
+          key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('key='+key+'\n')
+          print('Prepared public Python-package download cache identity; installation and dependency checks still run.')
+          PY_CACHE
+
+      - name: Restore public Python package downloads
+        id: python_download_cache
+        if: vars.PYTHON_DOWNLOAD_CACHE != 'false'
+        continue-on-error: true
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          # Share downloaded responses only, never locally compiled wheels.
+          path: ${{ runner.temp }}/nxnative-python-download-cache/http-v2
+          key: nxnative-pip-downloads-v1-${{ steps.python_cache_key.outputs.key }}
+
       - name: Install dependencies
+        id: dependency_install
         env:
+          PIP_CACHE_DIR: ${{ runner.temp }}/nxnative-python-download-cache
+          PYTHON_DOWNLOAD_CACHE: ${{ vars.PYTHON_DOWNLOAD_CACHE }}
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         shell: bash
         run: |
           set -euo pipefail
+          DEPENDENCY_START=$SECONDS
           brew install xcodegen zstd spirv-cross unar glslang
-          python -m pip install -q \
-            lz4 "capstone>=5,<6" fonttools backports.zstd gdown nsz zbic
+          PIP_ARGS=(-q -r "$RUNNER_TEMP/nxnative-python-requirements.txt")
+          if [[ "$PYTHON_DOWNLOAD_CACHE" == "false" ]]; then
+            PIP_ARGS+=(--no-cache-dir)
+          fi
+          if ! python -m pip install "${PIP_ARGS[@]}"; then
+            echo "::warning::Python installation failed; retrying once without the download cache."
+            python -m pip install --no-cache-dir "${PIP_ARGS[@]}"
+          fi
 
           # Xcode 26/27 runners ship the Metal shader compiler
           # as a separate on-demand component; the build script requires
@@ -202,6 +254,7 @@ jobs:
               || sudo xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk iphoneos metal --version | head -1
+          echo "DEPENDENCY_SECONDS=$((SECONDS - DEPENDENCY_START))" >> "$GITHUB_ENV"
 
       - name: Check dependencies and bundled shader tools before downloads
         timeout-minutes: 10
@@ -429,6 +482,18 @@ jobs:
           }
           path = Path(os.environ['RUNNER_TEMP']) / 'nxnative-build-environment.json'
           path.write_text(json.dumps(record, indent=2, sort_keys=True)+'\n', encoding='utf-8')
+          # Draft constraints are evidence for later testing, never applied automatically.
+          # This snapshots all observed Python distributions, not just the direct requirements.
+          candidate = [
+              '# CANDIDATE ONLY - NOT A TESTED LOCK; no package integrity hashes included.',
+              '# Includes all observed Python distributions; review scope before pinning.',
+              '# Run ID: '+record['run_id']+'; attempt: '+record['run_attempt'],
+              '# Match a successful full build and device test, then repeat-build before promotion.',
+          ]
+          for name, value in sorted(packages.items()):
+              if value != 'unavailable' and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.!+_-]{0,159}', value):
+                  candidate.append(name+'=='+value)
+          (Path(os.environ['RUNNER_TEMP']) / 'nxnative-python-constraints-candidate.txt').write_text('\n'.join(candidate)+'\n', encoding='utf-8')
           print('Recorded version-only build environment; check the final Actions result before treating this run as successful.')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
               summary.write('\n## Build environment\nThe NxNative-Build-Environment artifact records tool/package versions (one-day retention). It is not a dependency lock or a build-success certificate. Save it alongside a successful full-build run before proposing dependency pins.\n')
@@ -3302,6 +3367,7 @@ jobs:
           fi
 
       - name: Restore compiled iOS shader cache (exact match only)
+        id: shader_cache
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && inputs.shader_cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -3687,6 +3753,7 @@ jobs:
           PYTHON
 
       - name: Build unsigned IPA
+        id: ipa_build
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'
         env:
           ROMFS_MODE_INPUT: ${{ inputs.romfs_mode }}
@@ -3697,6 +3764,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          IPA_BUILD_START=$SECONDS
           WORK="$RUNNER_TEMP/nxnative"
           GAME_DIR="$RUNNER_TEMP/GameFiles"
           OUTPUT="$RUNNER_TEMP/$IPA_FILENAME"
@@ -3798,6 +3866,66 @@ jobs:
 
           echo "IPA successfully created: $OUTPUT"
           ls -lh "$OUTPUT"
+          echo "IPA_BUILD_SECONDS=$((SECONDS - IPA_BUILD_START))" >> "$GITHUB_ENV"
+
+      - name: Report cache outcomes and build timings
+        if: always()
+        continue-on-error: true
+        env:
+          PYTHON_DOWNLOAD_CACHE: ${{ vars.PYTHON_DOWNLOAD_CACHE }}
+          PYTHON_CACHE_HIT: ${{ steps.python_download_cache.outputs.cache-hit }}
+          PYTHON_CACHE_OUTCOME: ${{ steps.python_download_cache.outcome }}
+          SHADER_CACHE_ENABLED: ${{ inputs.shader_cache }}
+          SHADER_CACHE_HIT: ${{ steps.shader_cache.outputs.cache-hit }}
+          SHADER_CACHE_OUTCOME: ${{ steps.shader_cache.outcome }}
+          DEPENDENCY_OUTCOME: ${{ steps.dependency_install.outcome }}
+          IPA_BUILD_OUTCOME: ${{ steps.ipa_build.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_CACHE'
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          def seconds(name):
+              value = os.environ.get(name, '')
+              return int(value) if re.fullmatch(r'[0-9]{1,8}', value) else None
+
+          def outcome(name):
+              value = os.environ.get(name, '')
+              return value if value in {'success', 'failure', 'cancelled', 'skipped'} else 'unknown'
+
+          def cache_status(enabled, hit, result):
+              if not enabled:
+                  return 'disabled'
+              if result != 'success':
+                  return 'unavailable'
+              return 'exact hit' if hit == 'true' else 'miss'
+
+          record = {
+              'schema': 1,
+              'dependency_step_seconds': seconds('DEPENDENCY_SECONDS'),
+              'ipa_build_step_seconds': seconds('IPA_BUILD_SECONDS'),
+              'dependency_step_outcome': outcome('DEPENDENCY_OUTCOME'),
+              'ipa_build_step_outcome': outcome('IPA_BUILD_OUTCOME'),
+              'python_download_cache': cache_status(os.environ.get('PYTHON_DOWNLOAD_CACHE') != 'false', os.environ.get('PYTHON_CACHE_HIT'), outcome('PYTHON_CACHE_OUTCOME')),
+              'shader_cache': cache_status(os.environ.get('SHADER_CACHE_ENABLED') == 'true', os.environ.get('SHADER_CACHE_HIT'), outcome('SHADER_CACHE_OUTCOME')),
+              'meaning': 'A cache hit means an archive was restored, not that every shader was reused. Build-step time excludes download, fingerprint, publication and queue time. This is not a device test.',
+          }
+          (root / 'nxnative-build-metrics.json').write_text(json.dumps(record, indent=2)+'\n', encoding='utf-8')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('\n## Cache and build timing\n')
+              summary.write('- Python package downloads: '+record['python_download_cache']+'; install and smoke checks are never skipped.\n')
+              summary.write('- Shader cache: '+record['shader_cache']+'; restored data is not proof of actual shader reuse.\n')
+              for label, key in [('Dependency installation', 'dependency_step_seconds'), ('IPA build step', 'ipa_build_step_seconds')]:
+                  value = record[key]
+                  summary.write('- '+label+': '+(str(value)+' seconds' if value is not None else 'not recorded (step did not finish successfully)')+'.\n')
+              summary.write('Compare matching successful runs and test the IPA on-device. Include download, hashing, cache transfer and upload time when judging total savings.\n')
+          print('Recorded cache outcomes and completed-step durations; no game paths, URLs or keys exported.')
+          PY_CACHE
 
       - name: Verify Downwell capture and iOS patch before publication
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
@@ -4191,7 +4319,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: NxNative-Build-Environment
-          path: ${{ runner.temp }}/nxnative-build-environment.json
+          path: |
+            ${{ runner.temp }}/nxnative-build-environment.json
+            ${{ runner.temp }}/nxnative-python-requirements.txt
+            ${{ runner.temp }}/nxnative-python-constraints-candidate.txt
+            ${{ runner.temp }}/nxnative-build-metrics.json
           if-no-files-found: warn
           retention-days: 1
 
@@ -4214,5 +4346,8 @@ jobs:
             "$RUNNER_TEMP/nxnative" \
             "$RUNNER_TEMP/GameFiles" \
             "$RUNNER_TEMP/nxnative-redacted-logs" \
-            "$RUNNER_TEMP/nxnative-build-environment.json"
+            "$RUNNER_TEMP/nxnative-build-environment.json" \
+            "$RUNNER_TEMP/nxnative-python-requirements.txt" \
+            "$RUNNER_TEMP/nxnative-python-constraints-candidate.txt" \
+            "$RUNNER_TEMP/nxnative-build-metrics.json"
 

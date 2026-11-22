@@ -2815,7 +2815,7 @@ jobs:
                   f.write('## A Short Hike legacy MSAA workaround\n- Capability-checked 8-to-4 backing samples for eligible textures, this title only.\n- Same renderer code as the user-confirmed A12Z test. This integrated build is not yet device-verified.\n- No shader-source collection/export. Guest layout and shader semantics are not generally proven equivalent.\n')
           PY_SHORT_HIKE
 
-      - name: Apply LEGO-only isolated partial-clear test
+      - name: Apply LEGO-only automatic GPU diagnostic
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
         env:
           DEVICE_INPUT: ${{ inputs.device }}
@@ -2825,7 +2825,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY_LEGO'
-          """LEGO-CLEAR-v1: guarded source experiment, not a verified GPU-fault fix."""
+          """LEGO-DIAG-v1: automatic metadata recorder, NOT a gameplay fix."""
           import hashlib
           import json
           import os
@@ -2838,70 +2838,91 @@ jobs:
               'dm/gfx/nvn/nvn_mtl_legacy.inc': '351268eb459d0038826f8a20f374001ac4e1b9b497ef73c69f872bf8531b68cb',
               'dm/ios/tools/build_ipa.sh': '174019237dd0fd3b4bd92b753ffc1eacc20a9224ec97415cde79a415a4f1af22',
           }
-          ANCHOR = '''                if (g_rc_skip) { PD("c %llu depth-stencil clear skipped by conditional rendering", g_stat_pass); break; }
-                          if (g_rt_merged) rp_end();'''
-          INSERT = '''                // LEGO-CLEAR-v1: preserve partial-clear semantics even with no open
-                          // encoder (including merged-pass splits). Isolate the existing clear
-                          // triangle; do not replace it with a full-attachment load clear.
-                          if (DM_GAME_PROGRAM_ID == 0x01006F600FFC8000ull && R.rt.depth &&
-                              !scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview)) {
-                              rp_end();
-                              clear_ds_tri(c);
-                              rp_end();
-                              args_dirty_all();
-                              g_pso_dirty = g_dss_dirty = 1;
-                              static int lego_clear_note;
-                              if (!lego_clear_note++) MLOG("[LEGO-CLEAR-v1] isolated scissored depth-stencil clear; gameplay verification pending");
-                              break;
-                          }
-          '''
-          HOOK = '    python3 "$IOS_SOURCE/tools/prepare_legacy_resources.py"'
-          GUARD = '''    # LEGO-CLEAR-v1: validate the final, possibly provisional, game profile.
-              LEGO_PROGRAM_ID=$(gp program_id)
-              python3 -c 'import sys; sys.exit(0 if sys.argv[1] == "01006F600FFC8000" and int(sys.argv[2], 16) == 0x01006F600FFC8000 else "LEGO final profile mismatch")' "$GAME" "$LEGO_PROGRAM_ID" ||
-                die "LEGO final profile guard failed"
-          '''
+          PAYLOADS = {'dm/gfx/nvn/lego_trace_ring.h': "/* LEGO-DIAG-v1: metadata only; portable bounded whole-record ring. */\n#ifndef LEGO_TRACE_RING_H\n#define LEGO_TRACE_RING_H\n#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n#ifndef LEGO_TRACE_CAP\n#define LEGO_TRACE_CAP (4u * 1024u * 1024u)\n#endif\ntypedef struct {\n    char bytes[LEGO_TRACE_CAP];\n    size_t head, used;\n    uint64_t dropped, truncated;\n} lego_trace_ring;\nstatic void lego_ring_reset(lego_trace_ring *r) {\n    r->head = r->used = 0; r->dropped = r->truncated = 0;\n}\n/* Every input ends with newline. Eviction never leaves a partial old record. */\nstatic void lego_ring_add(lego_trace_ring *r, const char *p, size_t n) {\n    if (!n) return;\n    if (n > LEGO_TRACE_CAP) { r->truncated++; return; }\n    while (r->used + n > LEGO_TRACE_CAP) {\n        char c;\n        do {\n            c = r->bytes[r->head];\n            r->head = (r->head + 1) % LEGO_TRACE_CAP; r->used--;\n        } while (r->used && c != '\\n');\n        r->dropped++;\n    }\n    size_t tail = (r->head + r->used) % LEGO_TRACE_CAP;\n    size_t first = n < LEGO_TRACE_CAP - tail ? n : LEGO_TRACE_CAP - tail;\n    memcpy(r->bytes + tail, p, first);\n    memcpy(r->bytes, p + first, n - first); r->used += n;\n}\nstatic void lego_ring_copy(const lego_trace_ring *r, void *out) {\n    size_t first = r->used < LEGO_TRACE_CAP - r->head ? r->used : LEGO_TRACE_CAP - r->head;\n    memcpy(out, r->bytes + r->head, first);\n    memcpy((char *)out + first, r->bytes, r->used - first);\n}\n/* Reports only the declared range's containment, not shader access validity. */\nstatic int lego_range_fits(uint64_t offset, uint64_t size, uint64_t length) {\n    return offset <= length && size <= length - offset;\n}\n#endif\n", 'dm/gfx/nvn/lego_diag_support.inc': '// LEGO-DIAG-v1: all collection is on the replay thread; callbacks use copies.\n#include "lego_trace_ring.h"\n#include <stdarg.h>\nstatic lego_trace_ring g_lego_trace;\nstatic _Atomic int g_lego_diag_claimed;\nstatic int lego_diag_on(void) {\n    return DM_GAME_PROGRAM_ID == 0x01006F600FFC8000ull && !atomic_load(&g_lego_diag_claimed);\n}\nstatic void lego_diag_note(const char *format, ...) __attribute__((format(printf, 1, 2)));\nstatic void lego_diag_note(const char *format, ...) {\n    if (!lego_diag_on()) return;\n    char line[2048]; va_list ap; va_start(ap, format);\n    int n = vsnprintf(line, sizeof line - 1, format, ap); va_end(ap);\n    if (n < 0) return;\n    size_t used = (size_t)n;\n    if (used >= sizeof line - 1) { used = sizeof line - 2; g_lego_trace.truncated++; }\n    line[used++] = \'\\n\'; lego_ring_add(&g_lego_trace, line, used);\n}\nstatic void lego_diag_begin(void) {\n    if (!lego_diag_on()) return;\n    lego_ring_reset(&g_lego_trace);\n    static int announced;\n    if (!announced++) MLOG("[LEGO-DIAG-v1] automatic GPU binding report enabled; diagnostic only");\n    lego_diag_note("SUBMISSION serial=%llu", (unsigned long long)g_sub_serial);\n}\nstatic NSData *lego_diag_snapshot(void) {\n    if (!lego_diag_on() || !g_lego_trace.used) return nil;\n    NSMutableData *data = [NSMutableData dataWithLength:g_lego_trace.used];\n    lego_ring_copy(&g_lego_trace, data.mutableBytes);\n    return data; // Never mutated again; completion captures metadata, not resources.\n}\nstatic void lego_diag_complete(id<MTLCommandBuffer> cb, uint64_t fence, uint64_t frame,\n        NSData *trace, uint64_t dropped, uint64_t truncated, NSString *context) {\n    if (!trace || ![cb.error.domain isEqualToString:MTLCommandBufferErrorDomain] ||\n        cb.error.code != MTLCommandBufferErrorPageFault) return;\n    if (atomic_exchange(&g_lego_diag_claimed, 1)) return;\n    @autoreleasepool {\n        NSString *errorText = cb.error.description ?: @"-";\n        if (errorText.length > 65536) errorText = [[errorText substringToIndex:65536] stringByAppendingString:@"\\nERROR DESCRIPTION TRUNCATED"];\n        NSString *ctx = context ?: @"-";\n        if (ctx.length > 65536) ctx = [[ctx substringToIndex:65536] stringByAppendingString:@"\\nCONTEXT TRUNCATED"];\n        NSString *header = [NSString stringWithFormat:\n            @"LEGO-DIAG-v1\\nTitle=01006F600FFC8000 engine=b5ac83de5c3c chain=62c14e505bff\\n"\n             "First observed replay PageFault callback; not necessarily earliest GPU access.\\n"\n             "fence=%llu frame-at-commit=%llu dropped-records=%llu truncated-records=%llu trace-bytes=%lu\\n"\n             "Metadata only. No shader code, game bytes, keys or save contents.\\n"\n             "B=argument binding; R=actual root; C=cached root reuse; D=draw; V=vertex input; I=index input; U=resource use declaration.\\n"\n             "fits=declared range fits backing allocation; not proof of shader bounds or lifetime correctness.\\n"\n             "Cached roots reference prior B/R records; ring eviction can remove those records.\\n"\n             "Guest vertex/index metadata is before draw-specific conversion; D/I indirect counts are not GPU-resolved.\\n"\n             "Registry generations are observations, not a full allocation/free lifetime trace.\\n"\n             "\\nERROR\\n%@\\nCONTEXT\\n%@\\nTRACE\\n",\n            (unsigned long long)fence, (unsigned long long)frame,\n            (unsigned long long)dropped, (unsigned long long)truncated,\n            (unsigned long)trace.length, errorText, ctx];\n        NSMutableData *report = [[header dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];\n        [report appendData:trace];\n        NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];\n        NSError *error = nil;\n        BOOL made = [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error];\n        NSString *path = [dir stringByAppendingPathComponent:@"LEGO-GPU-report.txt"];\n        BOOL saved = made && [report writeToFile:path options:NSDataWritingAtomic error:&error];\n        MLOG("[LEGO-DIAG-v1] first PageFault fence=%llu report=%s bytes=%lu dropped=%llu truncated=%llu saved=%d error=%s",\n            (unsigned long long)fence, path.UTF8String, (unsigned long)report.length,\n            (unsigned long long)dropped, (unsigned long long)truncated, saved,\n            (error.localizedDescription ?: @"none").UTF8String);\n        // Small fallback in the normal runtime log, even if file export fails.\n        const char *bytes = trace.bytes; size_t start = trace.length > 12288 ? trace.length - 12288 : 0;\n        if (start) { while (start < trace.length && bytes[start] != \'\\n\') start++; if (start < trace.length) start++; }\n        for (size_t p = start; p < trace.length;) {\n            size_t n = MIN((size_t)1000, trace.length - p);\n            MLOG("[LEGO-DIAG-tail] %.*s", (int)n, bytes + p); p += n;\n        }\n    }\n}\n', 'dm/gfx/nvn/lego_diag_bindings.inc': '// Read-only metadata collection; called with existing registry lock where needed.\nstatic void lego_diag_bindings(id<MTLCommandEncoder> en, NvShader *sh, int stage, const uint64_t *slots) {\n    if (!lego_diag_on()) return;\n    lego_diag_note("ARG encoder=%p label=%s pass=%llu serial=%llu draws-so-far=%llu stage=%d shader=%s abi=%d nb=%d length=%lu alignment=%lu direct=%d reg-gen=%llu ser-gen=%llu",\n        (__bridge void *)en, (en.label ?: @"-").UTF8String, (unsigned long long)g_stat_pass,\n        (unsigned long long)g_pass.serial, (unsigned long long)g_stat_draw, stage, sh->key,\n        sh->rf.abi, sh->rf.nb, (unsigned long)sh->ae.encodedLength, (unsigned long)sh->ae.alignment,\n        g_legacy_direct_arguments, (unsigned long long)atomic_load(&g_reg_gen), (unsigned long long)atomic_load(&g_ser_gen));\n    for (int i = 0; i < sh->rf.nb && i < NVN_REFL_MAXB; i++) {\n        const nvn_rbind *b = &sh->rf.b[i]; unsigned count = b->n ? b->n : 1;\n        if (b->aid >= NVN_REFL_MAXARG || count > NVN_REFL_MAXARG - b->aid) {\n            lego_diag_note("B invalid-reflection kind=%u aid=%u count=%u", b->kind, b->aid, count); continue;\n        }\n        const p_bind_buf *guest = NULL;\n        if (stage >= 0 && stage < 6 && b->reg < 16) {\n            if (b->kind == NVN_RB_CBUF || b->kind == NVN_RB_UBOP) guest = &S.ubo[stage][b->reg];\n            else if (b->kind == NVN_RB_SBUFP) guest = &S.ssbo[stage][b->reg];\n        }\n        int pointer = 0;\n        switch (b->kind) {\n            case NVN_RB_CBUF: case NVN_RB_SBUFP: case NVN_RB_SBUFU: case NVN_RB_UBOP:\n            case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0: case NVN_RB_DRV2:\n            case NVN_RB_IMGA: case NVN_RB_GEOMETRY: case NVN_RB_BORDER: pointer = 1; break;\n            default: break;\n        }\n        for (unsigned k = 0; k < count; k++) {\n            uint64_t token = slots[b->aid + k];\n            if (!pointer) {\n                // Do not dereference arbitrary texture/sampler tokens here.\n                lego_diag_note("B kind=%u reg=%u aid=%u element=%u token=%#llx rw=%u type=%u pixel-class=%u handle-offset=%u",\n                    b->kind, b->reg, b->aid + k, k, (unsigned long long)token, b->rw, b->dtt, b->dpf, b->off);\n                continue;\n            }\n            NSUInteger off = 0; id<MTLBuffer> buffer = legacy_buffer_at(token, &off);\n            uint64_t declared = guest ? guest->size : b->kind == NVN_RB_C1 ? sh->rf.c1_len : 0;\n            lego_diag_note("B kind=%u reg=%u aid=%u element=%u token=%#llx object=%p offset=%lu length=%lu guest=%#llx declared=%llu fits=%d mapped=%d rw=%u",\n                b->kind, b->reg, b->aid + k, k, (unsigned long long)token, (__bridge void *)buffer,\n                (unsigned long)off, (unsigned long)buffer.length,\n                guest ? (unsigned long long)guest->addr : 0ull, (unsigned long long)declared,\n                buffer ? lego_range_fits(off, declared, buffer.length) : 0, buffer != nil, b->rw);\n        }\n    }\n}\nstatic void lego_diag_texture(NvShader *sh, int stage, const nvn_rbind *b, int tid, id<MTLTexture> t, uint64_t token) {\n    if (!lego_diag_on()) return;\n    const treg_t *entry = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? &g_treg[tid] : NULL;\n    lego_diag_note("T shader=%s stage=%d aid=%u tid=%d serial=%llu token=%#llx object=%p parent=%p size=%lux%lux%lu levels=%lu level=%lu slice=%lu array=%lu type=%lu requested=%u format=%lu usage=%lu pool=%p pool-offset=%llu",\n        sh->key, stage, b->aid, tid, entry ? (unsigned long long)entry->t.serial : 0ull,\n        (unsigned long long)token, (__bridge void *)t, (__bridge void *)t.parentTexture,\n        (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,\n        (unsigned long)t.mipmapLevelCount, (unsigned long)t.parentRelativeLevel,\n        (unsigned long)t.parentRelativeSlice, (unsigned long)t.arrayLength, (unsigned long)t.textureType,\n        b->dtt, (unsigned long)t.pixelFormat, (unsigned long)t.usage,\n        entry ? (void *)entry->t.pool : NULL, entry ? (unsigned long long)entry->t.off : 0ull);\n}\nstatic void lego_diag_root(const char *kind, id<MTLCommandEncoder> en, NvShader *sh, int stage,\n        id<MTLBuffer> buffer, NSUInteger offset, NSUInteger length) {\n    if (!lego_diag_on()) return;\n    lego_diag_note("%s encoder=%p pass=%llu serial=%llu stage=%d shader=%s abi=%d root=%p offset=%lu length=%lu encoded=%lu alignment=%lu fits=%d reg-gen=%llu ser-gen=%llu",\n        kind, (__bridge void *)en, (unsigned long long)g_stat_pass, (unsigned long long)g_pass.serial,\n        stage, sh->key, sh->rf.abi, (__bridge void *)buffer, (unsigned long)offset,\n        (unsigned long)buffer.length, (unsigned long)length, (unsigned long)sh->ae.alignment,\n        buffer ? lego_range_fits(offset, length, buffer.length) : 0,\n        (unsigned long long)atomic_load(&g_reg_gen), (unsigned long long)atomic_load(&g_ser_gen));\n}\n// Never call mtl_addr here: it can make an unused pool resident. Copy only\n// scalar facts from the existing table under its lock; retain no resources.\ntypedef struct { uintptr_t object; uint64_t offset, length; int mapped, fits; } lego_guest_range;\nstatic lego_guest_range lego_diag_guest(uint64_t address, uint64_t size) {\n    lego_guest_range out = {0};\n    pthread_mutex_lock(&g_mu);\n    for (int i = 0; address && i < g_npool; i++) {\n        const pool_ent *p = &g_pools[i];\n        if (address < p->lo || address >= p->hi || address < p->base) continue;\n        out.object = (uintptr_t)(__bridge void *)p->buf;\n        out.offset = address - p->base; out.length = p->buf.length;\n        out.mapped = 1; out.fits = p->buf && lego_range_fits(out.offset, size, out.length);\n        break;\n    }\n    pthread_mutex_unlock(&g_mu);\n    return out;\n}\nstatic void lego_diag_draw(id<MTLRenderCommandEncoder> en, NvProg *pr, const p_draw *dw, const p_draw_idx *di) {\n    if (!lego_diag_on()) return;\n    lego_diag_note("D encoder=%p label=%s frame=%llu pass=%llu serial=%llu draw=%llu v=%s f=%s count=%d instances=%d first=%d base-vertex=%d base-instance=%d indirect=%#llx",\n        (__bridge void *)en, (en.label ?: @"-").UTF8String, (unsigned long long)atomic_load(&g_cur_frame),\n        (unsigned long long)g_stat_pass, (unsigned long long)g_pass.serial, (unsigned long long)g_stat_draw,\n        pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",\n        dw ? dw->count : di->count, dw ? dw->instances : di->instances, dw ? dw->first : 0,\n        di ? di->base_vertex : 0, dw ? dw->base_instance : di->base_instance,\n        (unsigned long long)(dw ? dw->ind : di->ind));\n    for (int i = 0; i < S.nattr && i < 16; i++) {\n        int st = S.attr[i].stream; if (!S.attr[i].fmt || st >= 16) continue;\n        lego_guest_range range = lego_diag_guest(S.vbuf[st].address, S.vbuf[st].size);\n        lego_diag_note("V attr=%d format=%u attr-offset=%u stream=%d guest=%#llx declared=%llu stride=%u divisor=%u object=%p offset=%llu length=%lu fits=%d",\n            i, (unsigned)S.attr[i].fmt, (unsigned)S.attr[i].offset, st, (unsigned long long)S.vbuf[st].address,\n            (unsigned long long)S.vbuf[st].size, S.stream[st].stride, S.stream[st].divisor,\n            (void *)range.object, (unsigned long long)range.offset, (unsigned long)range.length, range.fits);\n    }\n    if (di) {\n        uint64_t need = di->count > 0 && di->itype >= 0 && di->itype <= 2 ? (uint64_t)di->count << di->itype : 0;\n        lego_guest_range range = lego_diag_guest(di->ibuf, need);\n        lego_diag_note("I guest=%#llx type=%d count=%d indirect=%#llx object=%p offset=%llu length=%lu direct-count-bytes=%llu fits=%d",\n            (unsigned long long)di->ibuf, di->itype, di->count, (unsigned long long)di->ind,\n            (void *)range.object, (unsigned long long)range.offset, (unsigned long)range.length,\n            (unsigned long long)need, range.fits);\n    }\n}\n'}
           
           def once(text, old, new):
               if text.count(old) != 1:
-                  raise ValueError('LEGO: source anchor changed; refusing patch')
+                  raise ValueError('LEGO-DIAG: changed source anchor; refusing patch: ' + old[:90])
               return text.replace(old, new, 1)
+          
+          def transform(inc, packer):
+              inc = once(inc, 'static NSMutableString *g_sub_sample_notes;',
+                  'static NSMutableString *g_sub_sample_notes;\n#include "lego_diag_support.inc"')
+              inc = once(inc, '    [g_sub_sample_notes setString:@""];',
+                  '    [g_sub_sample_notes setString:@""];\n    lego_diag_begin();')
+              inc = once(inc, '    NSString *sample_notes = [g_sub_sample_notes copy];',
+                  '    NSString *sample_notes = [g_sub_sample_notes copy];\n'
+                  '    NSData *lego_trace = lego_diag_snapshot();\n'
+                  '    uint64_t lego_dropped = g_lego_trace.dropped, lego_truncated = g_lego_trace.truncated;')
+              inc = once(inc, '        log_function_errors(cb, "replay", fence);',
+                  '        lego_diag_complete(cb, fence, gpu_f, lego_trace, lego_dropped, lego_truncated, cctx);\n'
+                  '        log_function_errors(cb, "replay", fence);')
+              bind_hook = '    int offset_only = 0;\n    if (index < 32) {'
+              inc = once(inc, bind_hook,
+                  '    if (lego_diag_on()) lego_diag_note("E encoder=%p fragment=%d slot=%lu object=%p offset=%lu length=%lu fits=%d",\n'
+                  '        (__bridge void *)e, fragment, (unsigned long)index, (__bridge void *)b, (unsigned long)off,\n'
+                  '        (unsigned long)b.length, b ? lego_range_fits(off, 0, b.length) : 0);\n' + bind_hook)
+              use_hook = '    if (skip) { g_legacy_use_skipped++; return; }'
+              inc = once(inc, use_hook,
+                  '    if (lego_diag_on()) lego_diag_note("U encoder=%p object=%p requested=%lu union=%llu cached=%d compute=%d",\n'
+                  '        (__bridge void *)en, (__bridge void *)r, (unsigned long)usage, (unsigned long long)combined, skip, compute);\n' + use_hook)
+              anchor = 'static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);'
+              inc = once(inc, anchor, '#include "lego_diag_bindings.inc"\n' + anchor)
+              reuse = '        bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);'
+              inc = once(inc, reuse, reuse + '\n        lego_diag_root("C", en, sh, nvn_stage, sh->ab_buf, sh->ab_off, sh->arg_len ? sh->arg_len : sh->ae.encodedLength);')
+              inc = once(inc, '    sample_trace_args(sh, nvn_stage, slots);',
+                  '    lego_diag_bindings(en, sh, nvn_stage, slots);\n    sample_trace_args(sh, nvn_stage, slots);')
+              tex_hook = '            slots[aid] = trid;'
+              if inc.count(tex_hook) != 3:
+                  raise ValueError('LEGO-DIAG: texture binding hooks changed')
+              inc = inc.replace(tex_hook, tex_hook + '\n            lego_diag_texture(sh, nvn_stage, b, tid, t, trid);')
+              inc = once(inc, '    sample_trace_root(sh, nvn_stage, ab, off, arg_len);',
+                  '    sample_trace_root(sh, nvn_stage, ab, off, arg_len);\n    lego_diag_root("R", en, sh, nvn_stage, ab, off, arg_len);')
+              inc = once(inc, '    udc_note_draw(pr);', '    lego_diag_draw(en, pr, dw, di);\n    udc_note_draw(pr);')
+              hook = '    python3 "$IOS_SOURCE/tools/prepare_legacy_resources.py"'
+              guard = '''    # LEGO-DIAG-v1: validate the final provisional/registered profile.
+              LEGO_PROGRAM_ID=$(gp program_id)
+              python3 -c 'import sys; sys.exit(0 if sys.argv[1] == "01006F600FFC8000" and int(sys.argv[2], 16) == 0x01006F600FFC8000 else "LEGO diagnostic final profile mismatch")' "$GAME" "$LEGO_PROGRAM_ID" ||
+                die "LEGO diagnostic final profile guard failed"
+          '''
+              return inc, once(packer, hook, guard + hook)
           
           def apply(root, env):
               for key, value in {'DETECTED_TITLE_ID': TITLE, 'ENGINE_REV': ENGINE,
                                  'DEVICE_INPUT': DEVICE, 'CACHE_INPUT': 'false',
                                  'MODE_INPUT': 'Build IPA (Default)'}.items():
                   if env.get(key) != value:
-                      raise ValueError('LEGO: incorrect ' + key + '; no files changed')
+                      raise ValueError('LEGO-DIAG: incorrect ' + key + '; no files changed')
               profile = env.get('DM_GAME')
               if profile not in (TITLE, 'DEFAULT'):
-                  raise ValueError('LEGO: unexpected preliminary profile; no files changed')
+                  raise ValueError('LEGO-DIAG: unexpected preliminary profile')
               if profile == 'DEFAULT' and (root / 'dm/games' / TITLE).exists():
-                  raise ValueError('LEGO: DEFAULT conflicts with an existing profile')
+                  raise ValueError('LEGO-DIAG: DEFAULT conflicts with an existing profile')
               originals = {}
               for name, digest in EXPECTED.items():
                   data = (root / name).read_bytes()
                   if hashlib.sha256(data).hexdigest() != digest:
-                      raise ValueError('LEGO: unknown or already-patched source: ' + name)
+                      raise ValueError('LEGO-DIAG: unknown or already-patched source: ' + name)
                   originals[name] = data.decode('utf-8')
-              inc_name, sh_name = EXPECTED
-              inc = once(originals[inc_name], ANCHOR,
-                         ANCHOR.replace('                if (g_rt_merged)', INSERT + '                if (g_rt_merged)'))
-              sh = once(originals[sh_name], HOOK, GUARD + HOOK)
-              changes = {inc_name: inc, sh_name: sh}
-              # Complete every identity/hash/anchor check before writing either file.
+              for name in PAYLOADS:
+                  if (root / name).exists():
+                      raise ValueError('LEGO-DIAG: unexpected existing diagnostic file: ' + name)
+              inc_name, pack_name = EXPECTED
+              inc, pack = transform(originals[inc_name], originals[pack_name])
+              changes = {inc_name: inc, pack_name: pack, **PAYLOADS}
+              # All identities and anchors checked before any write.
               for name, text in changes.items():
                   (root / name).write_text(text, encoding='utf-8')
-              return {'test': 'LEGO-CLEAR-v1', 'title': TITLE, 'engine': ENGINE,
+              return {'test': 'LEGO-DIAG-v1', 'title': TITLE, 'engine': ENGINE,
                       'before': EXPECTED, 'after': {n: hashlib.sha256(t.encode()).hexdigest() for n, t in changes.items()},
                       'apple_compiled_here': False, 'gameplay_verified': False,
-                      'scope': 'Title-only partial depth-stencil clear routing and pass isolation. No shader or texture edits.'}
+                      'scope': 'Automatic bounded GPU binding metadata; no shader, draw, texture or storage behavior fix. Clear experiment not included.'}
           
           if __name__ == '__main__':
               report = apply(Path('.'), os.environ)
               print(json.dumps(report, sort_keys=True))
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
-                  f.write('## LEGO-CLEAR-v1 experimental test\n- Partial depth/stencil clears keep their scissor and execute in an isolated render pass.\n- Exact title, engine and source checks passed; shader cache disabled for this test.\n- NOT a confirmed A12Z GPU-fault fix. Apple compilation and gameplay must be checked.\n')
+                  f.write('## LEGO-DIAG-v1 diagnostic-only test\n- Exact title, engine, source and full-build guards passed.\n- Automatically saves Documents/LEGO-GPU-report.txt on the first observed replay PageFault.\n- Metadata only; no game/shader byte dump. No manual env.txt flags.\n- NOT a gameplay fix; Apple compilation and device report export still require testing.\n')
           PY_LEGO
 
       - name: Pre-build checks and summary
@@ -3811,7 +3832,7 @@ jobs:
                   f.write('- A Short Hike workaround markers found in the IPA executable. Device verification of this build remains pending.\n')
           PY_SHORT_HIKE
 
-      - name: Verify LEGO clear-test marker before publication
+      - name: Verify LEGO diagnostic marker before publication
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
         shell: bash
         run: |
@@ -3824,7 +3845,7 @@ jobs:
           import plistlib
           import zipfile
           
-          MARKER = b'[LEGO-CLEAR-v1] isolated scissored depth-stencil clear; gameplay verification pending'
+          MARKER = b'[LEGO-DIAG-v1] automatic GPU binding report enabled; diagnostic only'
           
           def verify(path):
               with zipfile.ZipFile(path) as z:
@@ -3837,15 +3858,15 @@ jobs:
                       raise ValueError('LEGO: invalid executable name')
                   binary = z.read(infos[0].rsplit('/', 1)[0] + '/' + name)
                   if MARKER not in binary:
-                      raise ValueError('LEGO: clear-test marker missing; refusing publication')
+                      raise ValueError('LEGO: diagnostic marker missing; refusing publication')
               return hashlib.sha256(binary).hexdigest()
           
           if __name__ == '__main__':
               digest = verify(Path(os.environ['RUNNER_TEMP']) / os.environ['IPA_FILENAME'])
-              print('LEGO: clear-test marker found. Executable SHA256: ' + digest)
+              print('LEGO: diagnostic marker found. Executable SHA256: ' + digest)
               print('Packaging identity only; not proof of A12Z rendering or gameplay.')
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
-                  f.write('- LEGO-CLEAR-v1 marker found in the IPA executable. Device verification remains pending.\n')
+                  f.write('- LEGO-DIAG-v1 marker found in the IPA executable. Device verification remains pending.\n')
           PY_LEGO
 
       - name: Report IPA identity, size, hash and RomFS requirements

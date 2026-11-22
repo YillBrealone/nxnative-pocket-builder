@@ -29,6 +29,23 @@ When available, save the **NxNative-Build-Environment** artifact before its one-
 
 A note that Metal differs from the committed upstream lock is not itself a failed check. It reports a difference while retaining the workflow's existing Xcode policy.
 
+## Caching did not make the build faster
+
+Check **Cache and build timing** in the run summary and the Actions step durations.
+
+- **Miss:** normal on the first run or after a matching input/tool/workflow changes. Do not weaken the cache key to force a hit.
+- **Exact hit:** an archive was restored; the builder may still need to compile work not covered by it. Compare the completed build time and total run time.
+- **Unavailable:** cache restoration failed or the cache step did not run. Python installation can continue normally; review the step log.
+- **Disabled:** expected when Python caching is disabled by its variable, or Shader cache is off.
+
+Python download caching is not a dependency lock. Set **`PYTHON_DOWNLOAD_CACHE=false`** to compare an uncached run. The installer retries once without cache if installation fails; a second failure is still reported. Do not cache whole Homebrew/Xcode installations to work around failures.
+
+Keep shader caching off for the existing Downwell/A Short Hike workarounds. Cache transfer and input hashing can outweigh savings, especially for a small game. GitHub caches are not covered by the one-day artifact retention setting.
+
+### Can I use the generated constraints file immediately?
+
+No. It is a draft snapshot, not an approved lock. Confirm that its matching full build succeeded, test the IPA, review which packages belong in the constraints, then repeat-build with those constraints before promoting them. A successful Survey Only run is not enough. No exact dependency versions were newly approved in this update.
+
 ## Game or key download failed
 
 Common causes: expired links, missing files, login requirements, permissions, download quotas, or a webpage supplied instead of a direct file link.

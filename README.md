@@ -83,6 +83,56 @@ RomFS is the game's data.
 
 Downloads can contain game data and are not private storage. To disable GoFile, set the repository Actions variable **`GOFILE_UPLOAD=false`**. GitHub artifact uploads remain enabled.
 
+## In-game performance settings
+
+Start with the settings that already work for your game. Change one option at a time and restart before comparing the same scene.
+
+- **Render scale (experimental):** effect depends on the engine and game. It may change output size without changing internal rendering resolution.
+- **Dynamic resolution (game-dependent):** a visible toggle does not prove support. Leave it off if gameplay is already smooth.
+- **Frame generation (experimental):** try off first when troubleshooting. It can add artifacts or GPU work and does not increase the game's simulation speed.
+- **Frame rate:** a higher target does not guarantee more FPS; it may change game speed or heat.
+
+This update adds explanations, not new graphics behavior. Existing defaults, saved choices and engine-specific visibility rules are preserved.
+
+## Build records and retention
+
+IPA, separate RomFS, redacted build-log and build-environment artifacts are retained for **one day**. GoFile downloads are configured for **five hours**. These settings do not delete GitHub's own Actions run history or console logs; manage those separately in the repository.
+
+The **NxNative-Build-Environment** artifact contains:
+
+- `nxnative-build-environment.json`: observed tool/package versions and run/engine revisions.
+- `nxnative-python-requirements.txt`: the builder's existing Python requirements.
+- `nxnative-python-constraints-candidate.txt`: a **draft**, version-pinned snapshot of observed Python packages. It includes unrelated installed packages, has no package hashes, and is **not a tested lock**. It is never applied automatically.
+- `nxnative-build-metrics.json`: completed dependency/build-step durations and cache outcomes, when available.
+
+These records exclude keys, game URLs, environment dumps and package source URLs. Records can exist even when a later build step fails; check the final run result.
+
+Save this record from successful **full IPA builds** before it expires. Dependencies are not yet fully locked: successful Mac-build records and repeat-build testing are needed before choosing exact versions. Engine and GitHub Action revisions are pinned.
+
+## Build speed and caches
+
+### Python package downloads
+
+An isolated cache stores public Python-package downloads, including downloaded prebuilt wheels. Only pip's `http-v2` download cache is shared; locally compiled wheels are not shared. Every run still installs the requirements and performs dependency checks. The cache does **not** preserve an installed Python environment, Xcode, Homebrew tools, games or keys. Keys include requirements, workflow revision, Python/pip, macOS and architecture; there are no broad fallback keys.
+
+This can reduce repeated setup, but savings may be small. Set the repository Actions variable **`PYTHON_DOWNLOAD_CACHE=false`** to disable it. A failed Python installation is retried once without using the cache; repeated failures still stop the build.
+
+### Shader cache (optional)
+
+Keep **Shader cache off** for initial testing and for the current Downwell/A Short Hike legacy workarounds. Enabling it can expose game-derived shader data through a public repository's cache. Never use it to bypass a failed build check.
+
+To assess reuse for another working game:
+
+1. Run a successful build with **Shader cache on** to populate the cache.
+2. Start another run with the same workflow revision, engine, game/update/DLC files and options. Do not edit the workflow between runs.
+3. Check **Cache and build timing** in the summary. Compare total job time as well as the IPA build-step time, and test the IPA on your device. A restored archive does not prove all shaders were reused.
+
+The first run still needs to compile. Runner/tool changes may correctly produce a cache miss. A cache-off run provides an additional baseline if you want to measure whether caching helps overall.
+
+**Cache retention is separate from artifact retention.** GitHub's cache lifecycle applies; the one-day artifact setting does not delete caches. Disabling a cache stops future use but does not delete existing entries. Manage those under Actions → Caches.
+
+All of this can be operated through Safari on an iPhone or iPad; the Mac work runs on the Actions runner. No renderer, texture-quality or game-fix changes are made for these speed improvements.
+
 ## Controls and help
 
 Use the in-game menu for the settings supported by your engine. Normal builds do not need diagnostic `env.txt` flags. English host menus do not guarantee English text in every game.

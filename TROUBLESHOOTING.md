@@ -25,7 +25,26 @@ These failures happen before game downloads and do not mean the game is incompat
 | Source/hash/translator mismatch | Restore the matching engine/workflow revision. Do not edit expected hashes or rename shader libraries to force a pass. |
 | Timeout | Retry once for a possible runner issue. Repeated failures need the exact error reviewed. |
 
+When available, save the **NxNative-Build-Environment** artifact before its one-day expiry. Match its run ID/attempt with the Actions result. It records observed versions, not a guaranteed-good dependency set. Missing inventory data alone does not mean a game is incompatible.
+
 A note that Metal differs from the committed upstream lock is not itself a failed check. It reports a difference while retaining the workflow's existing Xcode policy.
+
+## Caching did not make the build faster
+
+Check **Cache and build timing** in the run summary and the Actions step durations.
+
+- **Miss:** normal on the first run or after a matching input/tool/workflow changes. Do not weaken the cache key to force a hit.
+- **Exact hit:** an archive was restored; the builder may still need to compile work not covered by it. Compare the completed build time and total run time.
+- **Unavailable:** cache restoration failed or the cache step did not run. Python installation can continue normally; review the step log.
+- **Disabled:** expected when Python caching is disabled by its variable, or Shader cache is off.
+
+Python download caching is not a dependency lock. Set **`PYTHON_DOWNLOAD_CACHE=false`** to compare an uncached run. The installer retries once without cache if installation fails; a second failure is still reported. Do not cache whole Homebrew/Xcode installations to work around failures.
+
+Keep shader caching off for the existing Downwell/A Short Hike workarounds. Cache transfer and input hashing can outweigh savings, especially for a small game. GitHub caches are not covered by the one-day artifact retention setting.
+
+### Can I use the generated constraints file immediately?
+
+No. It is a draft snapshot, not an approved lock. Confirm that its matching full build succeeded, test the IPA, review which packages belong in the constraints, then repeat-build with those constraints before promoting them. A successful Survey Only run is not enough. No exact dependency versions were newly approved in this update.
 
 ## Game or key download failed
 
@@ -48,6 +67,12 @@ Check that:
 - **Profile override** is blank unless you need a specific profile.
 
 If you enter a base URL in the run form, enter any wanted update/DLC links there too. Saved update/DLC secrets are not used with a popup base URL.
+
+### Duplicate packages or filename conflicts
+
+Packages are skipped only when a filename/size collision also has matching SHA-256 contents. Hashing large colliding files can take time.
+
+If two files have the same name but different contents, the builder uses a label-prefixed name when free. If that name also contains different data, it stops rather than overwriting anything. Give the conflicting files distinct names in your own archive/download folder and retry. Do not rename file extensions to hide an invalid signature.
 
 ## It says DEFAULT or provisional profile
 
@@ -95,9 +120,17 @@ Keep your previous working IPA and back up saves before replacing it again.
 
 Options depend on the workflow and engine. The advanced layout editor currently targets **NX2Apple** and is not identical across all engines. Check which branch and engine produced the IPA.
 
+### A setting appears but makes no difference
+
+Visibility is not a guarantee of game support. Render scale and dynamic resolution may not affect a particular title; frame generation may add artifacts or load. Start with your working defaults, change one option at a time, restart, and compare the same scene. Do not force higher FPS to fix a build failure.
+
+Support notes describe uncertainty, not measured performance on your device. No renderer or game-fix changes were made in this reliability update.
+
 ## Asking for help
 
 Send the run/job link, selected branch/engine, and the first failed step's final error lines. For an in-game problem, include the device, OS, installation method and new guest log.
+
+Build-log and environment artifacts expire after **one day**. This does not automatically delete Actions console logs or run history. Download the records you need promptly and review them before sharing.
 
 **Never send keys, private download links or unreviewed raw logs.** Automatic redaction is not a guarantee.
 

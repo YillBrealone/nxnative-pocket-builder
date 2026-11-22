@@ -2815,6 +2815,95 @@ jobs:
                   f.write('## A Short Hike legacy MSAA workaround\n- Capability-checked 8-to-4 backing samples for eligible textures, this title only.\n- Same renderer code as the user-confirmed A12Z test. This integrated build is not yet device-verified.\n- No shader-source collection/export. Guest layout and shader semantics are not generally proven equivalent.\n')
           PY_SHORT_HIKE
 
+      - name: Apply LEGO-only isolated partial-clear test
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        env:
+          DEVICE_INPUT: ${{ inputs.device }}
+          MODE_INPUT: ${{ inputs.build_mode }}
+          CACHE_INPUT: ${{ inputs.shader_cache }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_LEGO'
+          """LEGO-CLEAR-v1: guarded source experiment, not a verified GPU-fault fix."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          
+          TITLE = '01006F600FFC8000'
+          ENGINE = 'b5ac83de5c3c01ab30b3e0dbac8eaf32fe2f9b14'
+          DEVICE = 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+          EXPECTED = {
+              'dm/gfx/nvn/nvn_mtl_legacy.inc': '351268eb459d0038826f8a20f374001ac4e1b9b497ef73c69f872bf8531b68cb',
+              'dm/ios/tools/build_ipa.sh': '174019237dd0fd3b4bd92b753ffc1eacc20a9224ec97415cde79a415a4f1af22',
+          }
+          ANCHOR = '''                if (g_rc_skip) { PD("c %llu depth-stencil clear skipped by conditional rendering", g_stat_pass); break; }
+                          if (g_rt_merged) rp_end();'''
+          INSERT = '''                // LEGO-CLEAR-v1: preserve partial-clear semantics even with no open
+                          // encoder (including merged-pass splits). Isolate the existing clear
+                          // triangle; do not replace it with a full-attachment load clear.
+                          if (DM_GAME_PROGRAM_ID == 0x01006F600FFC8000ull && R.rt.depth &&
+                              !scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview)) {
+                              rp_end();
+                              clear_ds_tri(c);
+                              rp_end();
+                              args_dirty_all();
+                              g_pso_dirty = g_dss_dirty = 1;
+                              static int lego_clear_note;
+                              if (!lego_clear_note++) MLOG("[LEGO-CLEAR-v1] isolated scissored depth-stencil clear; gameplay verification pending");
+                              break;
+                          }
+          '''
+          HOOK = '    python3 "$IOS_SOURCE/tools/prepare_legacy_resources.py"'
+          GUARD = '''    # LEGO-CLEAR-v1: validate the final, possibly provisional, game profile.
+              LEGO_PROGRAM_ID=$(gp program_id)
+              python3 -c 'import sys; sys.exit(0 if sys.argv[1] == "01006F600FFC8000" and int(sys.argv[2], 16) == 0x01006F600FFC8000 else "LEGO final profile mismatch")' "$GAME" "$LEGO_PROGRAM_ID" ||
+                die "LEGO final profile guard failed"
+          '''
+          
+          def once(text, old, new):
+              if text.count(old) != 1:
+                  raise ValueError('LEGO: source anchor changed; refusing patch')
+              return text.replace(old, new, 1)
+          
+          def apply(root, env):
+              for key, value in {'DETECTED_TITLE_ID': TITLE, 'ENGINE_REV': ENGINE,
+                                 'DEVICE_INPUT': DEVICE, 'CACHE_INPUT': 'false',
+                                 'MODE_INPUT': 'Build IPA (Default)'}.items():
+                  if env.get(key) != value:
+                      raise ValueError('LEGO: incorrect ' + key + '; no files changed')
+              profile = env.get('DM_GAME')
+              if profile not in (TITLE, 'DEFAULT'):
+                  raise ValueError('LEGO: unexpected preliminary profile; no files changed')
+              if profile == 'DEFAULT' and (root / 'dm/games' / TITLE).exists():
+                  raise ValueError('LEGO: DEFAULT conflicts with an existing profile')
+              originals = {}
+              for name, digest in EXPECTED.items():
+                  data = (root / name).read_bytes()
+                  if hashlib.sha256(data).hexdigest() != digest:
+                      raise ValueError('LEGO: unknown or already-patched source: ' + name)
+                  originals[name] = data.decode('utf-8')
+              inc_name, sh_name = EXPECTED
+              inc = once(originals[inc_name], ANCHOR,
+                         ANCHOR.replace('                if (g_rt_merged)', INSERT + '                if (g_rt_merged)'))
+              sh = once(originals[sh_name], HOOK, GUARD + HOOK)
+              changes = {inc_name: inc, sh_name: sh}
+              # Complete every identity/hash/anchor check before writing either file.
+              for name, text in changes.items():
+                  (root / name).write_text(text, encoding='utf-8')
+              return {'test': 'LEGO-CLEAR-v1', 'title': TITLE, 'engine': ENGINE,
+                      'before': EXPECTED, 'after': {n: hashlib.sha256(t.encode()).hexdigest() for n, t in changes.items()},
+                      'apple_compiled_here': False, 'gameplay_verified': False,
+                      'scope': 'Title-only partial depth-stencil clear routing and pass isolation. No shader or texture edits.'}
+          
+          if __name__ == '__main__':
+              report = apply(Path('.'), os.environ)
+              print(json.dumps(report, sort_keys=True))
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                  f.write('## LEGO-CLEAR-v1 experimental test\n- Partial depth/stencil clears keep their scissor and execute in an isolated render pass.\n- Exact title, engine and source checks passed; shader cache disabled for this test.\n- NOT a confirmed A12Z GPU-fault fix. Apple compilation and gameplay must be checked.\n')
+          PY_LEGO
+
       - name: Pre-build checks and summary
         env:
           DEVICE_INPUT: ${{ inputs.device }}
@@ -3721,6 +3810,43 @@ jobs:
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
                   f.write('- A Short Hike workaround markers found in the IPA executable. Device verification of this build remains pending.\n')
           PY_SHORT_HIKE
+
+      - name: Verify LEGO clear-test marker before publication
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_LEGO'
+          """Verify test marker in the actual IPA executable; not proof of gameplay."""
+          import hashlib
+          import os
+          from pathlib import Path
+          import plistlib
+          import zipfile
+          
+          MARKER = b'[LEGO-CLEAR-v1] isolated scissored depth-stencil clear; gameplay verification pending'
+          
+          def verify(path):
+              with zipfile.ZipFile(path) as z:
+                  infos = [n for n in z.namelist() if n.startswith('Payload/') and n.count('/') == 2 and n.endswith('.app/Info.plist')]
+                  if len(infos) != 1:
+                      raise ValueError('LEGO: expected one app Info.plist')
+                  info = plistlib.loads(z.read(infos[0]))
+                  name = info['CFBundleExecutable']
+                  if not isinstance(name, str) or '/' in name or name in ('', '.', '..'):
+                      raise ValueError('LEGO: invalid executable name')
+                  binary = z.read(infos[0].rsplit('/', 1)[0] + '/' + name)
+                  if MARKER not in binary:
+                      raise ValueError('LEGO: clear-test marker missing; refusing publication')
+              return hashlib.sha256(binary).hexdigest()
+          
+          if __name__ == '__main__':
+              digest = verify(Path(os.environ['RUNNER_TEMP']) / os.environ['IPA_FILENAME'])
+              print('LEGO: clear-test marker found. Executable SHA256: ' + digest)
+              print('Packaging identity only; not proof of A12Z rendering or gameplay.')
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                  f.write('- LEGO-CLEAR-v1 marker found in the IPA executable. Device verification remains pending.\n')
+          PY_LEGO
 
       - name: Report IPA identity, size, hash and RomFS requirements
         if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'

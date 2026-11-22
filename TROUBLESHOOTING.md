@@ -1,124 +1,120 @@
 # Troubleshooting
 
-## Start here
+**Start with the first red step in the Actions run.** Later skipped steps are usually a result of that failure.
 
-Open the failed run under **Actions** and expand the **first red step**. Later steps marked skipped usually mean an earlier step stopped the build.
-
-A build failure and an in-game crash are different problems. If the IPA was never created, changing LiveContainer or game settings will not fix that build failure.
+If no IPA was created, changing LiveContainer or in-game settings will not fix the build problem.
 
 ## I cannot start the workflow
 
-- Check that Actions is enabled and you have permission to run workflows.
-- Choose the correct workflow and branch in **Run workflow**.
-- If the form is awkward on a phone or iPad, try the browser's desktop-site mode or another browser.
-- If the run stays queued, check that the repository has access to the required **`xcode-27` runner**.
+- Check that Actions is enabled and you have permission to run it.
+- Select the correct workflow and branch.
+- On a phone or iPad, try desktop-site mode or another browser if the form does not work.
+- If the job stays queued, check access to the required **`xcode-27` runner**.
 
-After changing a YAML file, commit it and start a **new run**. **Re-run jobs** uses the old run's workflow revision.
+After replacing a YAML file, commit it and start a **new run**. **Re-run jobs** uses the old run's workflow revision.
 
-## The Xcode, dependency or tool check failed
+## Xcode or dependency checks failed
 
-These checks happen before game downloads. They do not mean your game is incompatible.
+These failures happen before game downloads and do not mean the game is incompatible.
 
-- **Wrong Xcode:** these workflows require **27.1**. Do not switch to the latest version or bypass the check without reviewing the engine requirements.
-- **Missing Python package, .NET or command:** inspect the preceding dependency/setup step. A fresh run may resolve a temporary installation failure.
-- **Metal compiler or SDK missing:** inspect the selected Xcode and Metal installation output.
-- **Source/hash/translator mismatch:** the engine files no longer match the expected version. Restore the matching workflow/engine revision; do not edit hashes or rename shader libraries to force a pass.
-- **Timeout:** retry once if it looks like a temporary runner issue. Repeated failures need the exact step error reviewed.
+| Problem | What to check |
+|---|---|
+| Wrong Xcode | These workflows require **27.1**. Do not switch versions or bypass the check blindly. |
+| Missing Python package, .NET or command | Read the preceding dependency/setup step. Retry if installation failed temporarily. |
+| Missing SDK or Metal compiler | Check the selected Xcode and Metal installation output. |
+| Source/hash/translator mismatch | Restore the matching engine/workflow revision. Do not edit expected hashes or rename shader libraries to force a pass. |
+| Timeout | Retry once for a possible runner issue. Repeated failures need the exact error reviewed. |
 
-A note that Metal differs from the committed upstream lock is not itself a failed check. The workflow reports that difference while retaining its existing Xcode policy. Do not change versions merely to hide the note.
+When available, save the **NxNative-Build-Environment** artifact before its one-day expiry. Match its run ID/attempt with the Actions result. It records observed versions, not a guaranteed-good dependency set. Missing inventory data alone does not mean a game is incompatible.
 
-## The game or keys would not download
+A note that Metal differs from the committed upstream lock is not itself a failed check. It reports a difference while retaining the workflow's existing Xcode policy.
 
-Common causes are an expired link, missing file, login requirement, sharing restriction, download quota or a file-host page that is not a direct download.
+## Game or key download failed
 
-For the **game file**, check that the link works without an interactive login. If Drive blocks automated downloads, use another supported direct link for a dump you are authorized to use.
+Common causes: expired links, missing files, login requirements, permissions, download quotas, or a webpage supplied instead of a direct file link.
 
-For **keys**, check the `Keys_URL` secret and its access/expiry. **Do not make your keys public or send them to someone troubleshooting the build.**
+- **Game:** check that the link works without an interactive login. If Drive blocks downloads, try a supported direct link for your own dump.
+- **Keys:** check the `Keys_URL` secret and its access/expiry. **Do not make your keys public or share them for troubleshooting.**
 
-Game and key downloads run in parallel. “Finished downloading prod.keys” can appear beside a game-download error; it does not mean both succeeded.
+Downloads run in parallel. “Finished downloading prod.keys” does not mean the game download succeeded.
 
-“No update configured” and “No DLC configured” are normal when you intentionally left them out.
+“No update configured” and “No DLC configured” are normal when those inputs are intentionally empty.
 
-## Extraction failed or the title was not detected
+## Extraction or title detection failed
 
-- Use a complete, supported game package—not an HTML download page saved with a game-file extension.
-- Check that compressed files and archives finished downloading and are not damaged.
-- Supply the base game, not just its update or DLC.
-- Use matching updates/DLC and appropriate keys from your own console.
-- Leave **Profile override** blank unless you know which profile is required.
+Check that:
 
-If you entered the base URL in the run form, enter any wanted update/DLC links there too. Saved update/DLC secrets are deliberately not used with a popup base URL.
+- The download is a complete game package, not an HTML page or damaged archive.
+- You supplied the **base game**, not only an update or DLC.
+- Updates, DLC and your keys match the intended game/packages.
+- **Profile override** is blank unless you need a specific profile.
+
+If you enter a base URL in the run form, enter any wanted update/DLC links there too. Saved update/DLC secrets are not used with a popup base URL.
+
+### Duplicate packages or filename conflicts
+
+Packages are skipped only when a filename/size collision also has matching SHA-256 contents. Hashing large colliding files can take time.
+
+If two files have the same name but different contents, the builder uses a label-prefixed name when free. If that name also contains different data, it stops rather than overwriting anything. Give the conflicting files distinct names in your own archive/download folder and retry. Do not rename file extensions to hide an invalid signature.
 
 ## It says DEFAULT or provisional profile
 
-This usually means the engine has no built-in profile for that game. The builder may create one automatically.
+The engine has no built-in profile for that game and may create one automatically. This is not automatically an error, but it does not guarantee compatibility.
 
-It is **not automatically an error**, but it is also not proof that the game will work. Do not enter a different game's profile to hide the message.
+Do not select another game's profile to hide the message.
 
 ## Shader compilation failed or progress looks stuck
 
-Open the first actual compiler error. A long shader task can remain on one stage without regular progress updates.
+Read the first compiler error. Some shaders take a long time without frequent progress updates.
 
-- Keep the selected engine and its shader tools together.
-- For a clean test, leave shader cache off.
-- Do not bypass compiler checks, disable validation or rename shader chains.
-- A survey or a successful shader build does not guarantee correct graphics on the device.
+Keep the engine and its shader tools together. Try a clean build with cache off. Do not bypass compiler checks, disable validation or rename shader chains.
 
-If a task repeatedly stops at the same point, share that step's error and the reviewed build logs.
+For repeated failures, share the failed step and reviewed build logs.
 
 ## Downwell or A Short Hike's patch check failed
 
-For their integrated legacy workarounds, use:
+Their integrated legacy workarounds require **Metal 3 + BC fallback**, **Build IPA**, **shader cache off**, and a blank profile override.
 
-- **Metal 3 + BC fallback** engine.
-- **Build IPA** mode.
-- **Shader cache off**.
-- **Profile override blank**.
+An unknown source hash or missing IPA patch marker needs review. Do not remove the guard. These workarounds do not apply to unrelated games or modern-engine builds.
 
-A source-hash failure or missing patch marker means the workflow cannot verify the intended patch. Do not remove the guard. These workarounds do not apply to unrelated games or modern-engine builds.
+## Disk space ran out
 
-## The runner ran out of disk space
+Extraction and shaders can need much more space than the downloaded game. Check the disk-space messages and use a runner with enough storage.
 
-Large packages, extraction and shader compilation can require much more space than the original download size.
+Separate RomFS makes the final IPA smaller; it does not guarantee low build-time disk use. Keep the existing cleanup safeguards enabled.
 
-Check the disk-space messages. Separate RomFS makes the final IPA smaller, but does not guarantee low build-time disk use. Use a runner with enough storage and keep the workflow's existing cleanup safeguards enabled.
+## I cannot find or install the IPA
 
-## The build finished, but I cannot find the IPA
+- Make sure you selected **Build IPA**, not Survey Only.
+- Check the run summary for download links; extract GitHub's ZIP artifact.
+- Download promptly—links and artifacts expire.
+- If publication was blocked by a verification check, resolve that error first.
+- The IPA is unsigned and still needs a suitable installation/signing method.
 
-- Confirm you selected **Build IPA**, not **Survey Only**.
-- Read the run summary for GoFile and GitHub artifact links.
-- GitHub downloads arrive as ZIP files; extract them to find the IPA.
-- Temporary links/artifacts expire. Download them promptly.
-- If publication was blocked by an IPA or patch check, resolve that error rather than bypassing it.
+## The app crashes or graphics are wrong
 
-An unsigned IPA must still be installed/signed through a suitable method; downloading it is not installation.
+Confirm the intended device/engine was selected. In separate-RomFS mode, check that the matching `romfs.img` is in the correct game's Documents folder.
 
-## The app opens, then closes—or graphics are black/wrong
+Get a **new guest/crash log** from that attempt. Do not assume every crash is memory, signing or LiveContainer-related. A successful build does not prove device compatibility.
 
-Now the problem is on the device, not necessarily in the downloader or build setup.
+Keep your previous working IPA and back up saves before replacing it again.
 
-- Confirm you built for the intended device/engine.
-- If using separate RomFS, follow the run summary and place the matching `romfs.img` in the correct game's Documents folder.
-- Check for a new guest/crash log from that attempt.
-- Keep your previous working IPA and back up saves before replacing the app again.
+## Controls or settings look different
 
-Do not assume every crash is low memory or a signing problem. The log is needed to distinguish those from graphics, shader or game-specific failures. Avoid random diagnostic flags as a first fix.
+Options depend on the workflow and engine. The advanced layout editor currently targets **NX2Apple** and is not identical across all engines. Check which branch and engine produced the IPA.
 
-## Controls or settings are different from another build
+### A setting appears but makes no difference
 
-Options depend on the engine and workflow. The advanced layout editor currently targets **NX2Apple**; it is not identical across all engines. Check the workflow, branch and engine used to create the IPA before assuming a setting has disappeared.
+Visibility is not a guarantee of game support. Render scale and dynamic resolution may not affect a particular title; frame generation may add artifacts or load. Start with your working defaults, change one option at a time, restart, and compare the same scene. Do not force higher FPS to fix a build failure.
 
-## What to send when asking for help
+Support notes describe uncertainty, not measured performance on your device. No renderer or game-fix changes were made in this reliability update.
 
-Send:
+## Asking for help
 
-1. The run/job link, branch and selected engine.
-2. The first failed step's name and its final error lines.
-3. For a runtime problem, the device model, OS, installation method and **new** guest/crash log.
-4. Relevant build logs, after reviewing them for private information.
+Send the run/job link, selected branch/engine, and the first failed step's final error lines. For an in-game problem, include the device, OS, installation method and new guest log.
 
-Do not send keys, private download links, complete environment dumps or unreviewed raw logs. Automatic log redaction is helpful but not a guarantee.
+Build-log and environment artifacts expire after **one day**. This does not automatically delete Actions console logs or run history. Download the records you need promptly and review them before sharing.
 
-## Return to a working version
+**Never send keys, private download links or unreviewed raw logs.** Automatic redaction is not a guarantee.
 
-Restore the previous workflow files on the affected branch and start a new build, or reinstall your known-working IPA using your usual method. Keep backups and do not merge entire experimental branches just to recover one fix.
+To roll back, restore the previous workflow files or reinstall a known-working IPA. No full branch merge is needed.

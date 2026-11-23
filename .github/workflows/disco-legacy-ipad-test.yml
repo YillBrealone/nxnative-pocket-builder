@@ -1,4 +1,4 @@
-name: Disco Elysium - Legacy iPad Test v1
+name: Disco Elysium - Legacy iPad Test v2
 
 on:
   workflow_dispatch:
@@ -2541,7 +2541,7 @@ jobs:
           Path(os.environ['RUNNER_TEMP']).joinpath('disco-legacy-source.json').write_text(json.dumps(report,indent=2)+'\n')
           print('[disco-legacy-v1] checked Legacy port installed; renderer, physical pool policy and other games unchanged')
           PY_DISCO_LEGACY
-          echo 'IPA_FILENAME=DiscoElysium-Legacy-iPad-Test-v1.ipa' >> "$GITHUB_ENV"
+          echo 'IPA_FILENAME=DiscoElysium-Legacy-iPad-Test-v2.ipa' >> "$GITHUB_ENV"
           echo 'Disco Legacy iPad test: address-space port plus logging; not a confirmed iPad compatibility fix.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Apply Downwell-only dynamic error-handler test
@@ -4309,18 +4309,45 @@ jobs:
                               name, seg, va, n, fo = struct.unpack_from('<16s16sQQI', b, p + 72 + j * 80)
                               sections[seg.rstrip(b'\0').decode(), name.rstrip(b'\0').decode()] = (va, n, fo)
                       p += size
-                  evidence = []
+                  evidence = []; module_layouts = {}
                   for mod, (bid, hooks) in EXPECTED.items():
                       fix = dict((r[0][2:], r[1]) for r in table(z.read(base+'dm/'+mod+'.fixups.tsv').decode()) if len(r) >= 2 and r[0].startswith('# '))
                       check(fix.get('BUILD_ID') == bid, 'wrong guest ' + mod + ' build')
                       gates = table(z.read(base+'dm/'+mod+'.gates.tsv').decode())
-                      x0 = sections['__TEXT', '__dm'+mod+'x0']; x1 = sections['__TEXT', '__dm'+mod+'x1']
                       patch = int(fix['PATCH_OFF'], 0)
+                      check(patch >= 0, 'unsupported negative patch layout for inspected ' + mod)
+                      whole = sections.get(('__TEXT', '__dm'+mod+'img'))
+                      x0 = sections.get(('__TEXT', '__dm'+mod+'x0'))
+                      x1 = sections.get(('__TEXT', '__dm'+mod+'x1'))
+                      if whole is not None:
+                          # Legacy loader.c map_image: one signed TEXT image, with a
+                          # data hole replaced at runtime from __DM<module>W,__img.
+                          # Only original code and the patch area are executable ranges
+                          # inspected here; never treat bytes in that data hole as code.
+                          check(x0 is None and x1 is None, 'ambiguous embedded layout for ' + mod)
+                          check('TEXT_END' in fix, 'missing TEXT_END for contiguous ' + mod)
+                          text_end = int(fix['TEXT_END'], 0)
+                          z0 = (text_end + 0x3fff) & ~0x3fff
+                          writable = sections.get(('__DM'+mod+'W', '__img'))
+                          check(writable is not None, 'missing writable backing for ' + mod)
+                          check(0 < text_end <= z0 <= patch < whole[1], 'invalid contiguous code/patch bounds for ' + mod)
+                          check(z0 + writable[1] == patch, 'Legacy data-hole/patch boundary mismatch for ' + mod)
+                          check(not ((whole[0] | whole[1] | writable[0] | writable[1]) & 0x3fff), 'unaligned Legacy image/backing for ' + mod)
+                          check(whole[2] + whole[1] <= len(b) and writable[2] + writable[1] <= len(b), 'embedded section exceeds file for ' + mod)
+                          ranges = [(0, text_end, whole[2]), (patch, whole[1] - patch, whole[2] + patch)]
+                          module_layouts[mod] = 'contiguous-legacy-image'
+                      else:
+                          check(x0 is not None and x1 is not None, 'no supported embedded code layout for ' + mod)
+                          check(0 < x0[1] <= patch and x1[1] > 0, 'invalid split code/patch bounds for ' + mod)
+                          check(x0[2] + x0[1] <= len(b) and x1[2] + x1[1] <= len(b), 'split section exceeds file for ' + mod)
+                          ranges = [(0, x0[1], x0[2]), (patch, x1[1], x1[2])]
+                          module_layouts[mod] = 'split-code-sections'
                       def word(a):
-                          for lo, size, fo in [(0, x0[1], x0[2]), (patch, x1[1], x1[2])]:
+                          check(a >= 0 and a % 4 == 0, 'invalid instruction address for ' + mod)
+                          for lo, size, fo in ranges:
                               if lo <= a and a + 4 <= lo + size:
                                   return struct.unpack_from('<I', b, fo + a - lo)[0]
-                          raise RuntimeError('Diagnostic gate address outside executable sections')
+                          raise RuntimeError('Diagnostic instruction address outside checked code ranges for ' + mod)
                       if mod == 'sdk':
                           ids = {int(row[2], 0) & 255 for row in gates if len(row) == 4 and row[1] == 'obs'}
                           check({22, 23, 24}.issubset(ids), 'missing existing SDK region gates')
@@ -4335,7 +4362,7 @@ jobs:
                           check(word(ret + 4) == original, 'original instruction not preserved')
                           check(branch(word(ret + 8), ret + 8) == off + 4, 'wrong gate continuation')
                           evidence.append({'module': mod, 'id': oid, 'offset': hex(off), 'original_word': hex(original)})
-                  return {'test': 'disco-legacy-v1', 'verified_packaged_hooks': evidence,
+                  return {'test': 'disco-legacy-v1', 'checker_revision': 2, 'module_layouts': module_layouts, 'verified_packaged_hooks': evidence,
                           'engine_stamp': info.get('DMCommit'), 'executable_sha256': hashlib.sha256(b).hexdigest(),
                           'scope': 'Packaging/instruction verification; not proof of device execution or gameplay.'}
           
@@ -4343,9 +4370,9 @@ jobs:
               root = Path(os.environ['RUNNER_TEMP'])
               result = verify(root / os.environ['IPA_FILENAME'])
               (root/'disco-legacy-verification.json').write_text(json.dumps(result, indent=2)+'\n')
-              print('[disco-legacy-v1] packaged Legacy renderer marker, fix source and all three observation hooks verified')
+              print('[disco-legacy-check-v2] packaged Legacy renderer marker, unchanged fix source and all three observation hooks verified: ' + str(result['module_layouts']))
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-                  f.write('\n## Disco Legacy iPad test v1\n- Checked Legacy renderer/fix markers and all three packaged observation hooks.\n- Uses Metal 3 / BC fallback and a Disco-only alias extension to 5.375 GiB (total reservation 6 GiB).\n- Legacy physical-memory pool policy and partition order are retained. This is not a confirmed iPad compatibility fix.\n- In LC, repeat the previously failing actions, then export log.txt whether it succeeds or fails. No env.txt flags needed.\n- Look for `[disco-legacy-v1] ACTIVE` and `[disco-alloc-v1] ARMED ... gates=1,1,1`.\n')
+                  f.write('\n## Disco Legacy iPad test v2 (checker correction only)\n- Checked Legacy renderer/fix markers and all three packaged observation hooks.\n- Uses Metal 3 / BC fallback and a Disco-only alias extension to 5.375 GiB (total reservation 6 GiB).\n- Legacy physical-memory pool policy and partition order are retained. This is not a confirmed iPad compatibility fix.\n- In LC, repeat the previously failing actions, then export log.txt whether it succeeds or fails. No env.txt flags needed.\n- Look for `[disco-legacy-v1] ACTIVE` and `[disco-alloc-v1] ARMED ... gates=1,1,1`.\n')
           PY_DISCO_LEGACY_VERIFY
 
       - name: Upload Disco Legacy build evidence

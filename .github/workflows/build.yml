@@ -1,4 +1,4 @@
-name: NxNative - Generic IPA Builder - Disco + Nintendo TEST v1
+name: NxNative - Generic IPA Builder
 
 on:
   workflow_dispatch:

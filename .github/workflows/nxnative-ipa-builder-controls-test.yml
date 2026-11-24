@@ -2503,31 +2503,6 @@ jobs:
           (root/'combined-disco-source.json').write_text(json.dumps(result,indent=2)+'\n')
           PY_COMBINED_DISCO
 
-      - name: Apply Legacy Nintendo touch arrangement
-        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY_LEGACY_NINTENDO'
-          import hashlib,json,os
-          from pathlib import Path
-          f=Path('dm/ios/Sources/DmGamepad.m');s=f.read_text()
-          if hashlib.sha256(f.read_bytes()).hexdigest()!='1bd407baceec6132ef955bb83c2fc634b2057e4a58fb72e099eae9673f9ddd43':
-              raise SystemExit('Legacy Nintendo: shared touch source changed; refusing patch')
-          if hashlib.sha256(Path('dm/ios/Sources/DmFaceLayout.h').read_bytes()).hexdigest()!='80becee7bd70ed897f4b9b26a631bb390d8052a406c84fc7559401f3b1cd7042':
-              raise SystemExit('Legacy Nintendo: base geometry header changed')
-          h=Path('dm/ios/Sources/DmNintendoFace.h')
-          if h.exists(): raise SystemExit('Legacy Nintendo: header already exists')
-          for old,new in [('#include "DmFaceLayout.h"', '#include "DmFaceLayout.h"\n#include "DmNintendoFace.h"'), ('    dm_face_offset offset = dm_face_layout_offset(&_faceLayout, (unsigned)b);', '    dm_face_offset offset = dm_nintendo_face_offset(getenv("DM_PAD_MAP"), (unsigned)b);'), ('- (void)updateSkillFaceLayout {\n    if (!NSThread.isMainThread) return;\n    // Freeze the entire diamond until every face-owned finger releases, even\n    // if a held finger slides into a gap. A UI transition cannot change its key.\n    if (!dm_face_layout_update(&_faceLayout, dm_za_skill_layout_active(), _faceOf.count != 0)) return;\n    [self setNeedsLayout]; [self layoutIfNeeded];\n    LOG("front end: virtual face geometry=%s; native button functions unchanged",\n        _faceLayout.skill ? "skill A right B bottom X top Y left" : "normal A bottom B right X left Y top");\n}\n', '- (void)updateSkillFaceLayout {\n    // Explicit user-selected layout is stable across games, menus and battle.\n    // reloadLiveOptions releases held touches before applying a menu change.\n}\n'), ('front end: native A/B/X/Y unchanged; virtual face geometry alone can follow the original battle skill HUD', '[legacy-nintendo-v1] Nintendo touch default A right B bottom X top Y left; preset changes geometry only; native inputs unchanged')]:
-              if s.count(old)!=1: raise SystemExit('Legacy Nintendo: source anchor mismatch')
-              s=s.replace(old,new,1)
-          if hashlib.sha256(s.encode()).hexdigest()!='b5e6bf86897aa24464cb3b51ddb193ca54a75a401097a834da7748922d434cdc': raise SystemExit('Legacy Nintendo: unexpected source result')
-          h.write_text('// Shared visible/hit-test geometry for the Legacy Nintendo control correction.\n// Native button IDs remain A=0, B=1, X=2, Y=3. Physical input is not remapped here.\n#pragma once\n#include <string.h>\n#include "DmFaceLayout.h"\nstatic inline dm_face_offset dm_nintendo_face_offset(const char *preset, unsigned button) {\n    // A right, B bottom, X top, Y left. UIKit positive Y points downward.\n    static const dm_face_offset nintendo[4] = {{1,0},{0,1},{0,-1},{-1,0}};\n    if (button >= 4) return (dm_face_offset){0,0};\n    int xbox = preset && !strcmp(preset, "xbox");\n    int ab = preset && !strcmp(preset, "ab");\n    if ((xbox || ab) && button < 2) button ^= 1u;\n    if (xbox && button >= 2) button ^= 1u;\n    return nintendo[button];\n}\n');f.write_text(s)
-          result={'test':'legacy-nintendo-v1','gamepad_sha256':'b5e6bf86897aa24464cb3b51ddb193ca54a75a401097a834da7748922d434cdc','geometry_sha256':hashlib.sha256(h.read_bytes()).hexdigest(),'scope':'Nintendo touch default and live preset geometry; native/physical mapping unchanged'}
-          (Path(os.environ['RUNNER_TEMP'])/'legacy-nintendo-source.json').write_text(json.dumps(result,indent=2)+'\n')
-          print('[legacy-nintendo-v1] visible and hit-test geometry share Nintendo default; physical input unchanged')
-          PY_LEGACY_NINTENDO
-
       - name: Apply Downwell-only dynamic error-handler test
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '010093D00C726000' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
         env:
@@ -2616,6 +2591,34 @@ jobs:
           if __name__ == '__main__':
               apply(Path('.'), os.environ)
           PY_DOWNWELL
+
+      - name: Apply Legacy Nintendo touch arrangement
+        if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && inputs.device == 'iPad (2020 A12Z) / iPhone 15 or older (Metal 3 + BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY_LEGACY_NINTENDO'
+          import hashlib,json,os
+          from pathlib import Path
+          f=Path('dm/ios/Sources/DmGamepad.m');s=f.read_text()
+          PAIRS={'3d69ff9c22013c6c425882285b759118cd0fbfc76801f31a672ad47150edee29': {'after': '6fa6665c65c009f16a1ffe465440a8ce78807e0e76c086c0ec92a308c6f84764', 'variant': 'main-build'}, 'f30be8be70452871355475408b1d9709da8c83c267c51d4f7e61ad29c9b8e45a': {'after': '8163ed82a3c900d7f575bdb14bb863951a9ae226abd40546ec6b3e4cf5835632', 'variant': 'main-nxnative-ipa-builder-controls-test'}, '9f15cd2bedfce73269d887336a462510903e68a620d844cf3abaee77740c2b36': {'after': 'f953a4411db1c55e2576a8ffd21d91b2f1ec1bfac92c0a86a44adf6c10e16801', 'variant': 'pocket-settings-test-build'}, '4aa816be9ce99f8744ec68323c7c2195f561fe74a30703a56e5b3f0f98c33fa9': {'after': 'f2e02dfdef5560fa1f331c9caccb80772628e2448b2fb6441d0d9a1b32ba62fd', 'variant': 'pocket-settings-test-nxnative-ipa-builder-controls-test'}}
+          before_hash=hashlib.sha256(f.read_bytes()).hexdigest()
+          if before_hash not in PAIRS:
+              raise SystemExit('Legacy Nintendo: shared touch source changed; refusing patch; actual SHA256='+before_hash)
+          expected=PAIRS[before_hash]
+          if hashlib.sha256(Path('dm/ios/Sources/DmFaceLayout.h').read_bytes()).hexdigest()!='80becee7bd70ed897f4b9b26a631bb390d8052a406c84fc7559401f3b1cd7042':
+              raise SystemExit('Legacy Nintendo: base geometry header changed')
+          h=Path('dm/ios/Sources/DmNintendoFace.h')
+          if h.exists(): raise SystemExit('Legacy Nintendo: header already exists')
+          for old,new in [('#include "DmFaceLayout.h"', '#include "DmFaceLayout.h"\n#include "DmNintendoFace.h"'), ('    dm_face_offset offset = dm_face_layout_offset(&_faceLayout, (unsigned)b);', '    dm_face_offset offset = dm_nintendo_face_offset(getenv("DM_PAD_MAP"), (unsigned)b);'), ('- (void)updateSkillFaceLayout {\n    if (!NSThread.isMainThread) return;\n    // Freeze the entire diamond until every face-owned finger releases, even\n    // if a held finger slides into a gap. A UI transition cannot change its key.\n    if (!dm_face_layout_update(&_faceLayout, dm_za_skill_layout_active(), _faceOf.count != 0)) return;\n    [self setNeedsLayout]; [self layoutIfNeeded];\n    LOG("front end: virtual face geometry=%s; native button functions unchanged",\n        _faceLayout.skill ? "skill A right B bottom X top Y left" : "normal A bottom B right X left Y top");\n}\n', '- (void)updateSkillFaceLayout {\n    // Explicit user-selected layout is stable across games, menus and battle.\n    // reloadLiveOptions releases held touches before applying a menu change.\n}\n'), ('front end: native A/B/X/Y unchanged; virtual face geometry alone can follow the original battle skill HUD', '[legacy-nintendo-v1] Nintendo touch default A right B bottom X top Y left; preset changes geometry only; native inputs unchanged')]:
+              if s.count(old)!=1: raise SystemExit('Legacy Nintendo: source anchor mismatch')
+              s=s.replace(old,new,1)
+          if hashlib.sha256(s.encode()).hexdigest()!=expected['after']: raise SystemExit('Legacy Nintendo: unexpected source result')
+          h.write_text('// Shared visible/hit-test geometry for the Legacy Nintendo control correction.\n// Native button IDs remain A=0, B=1, X=2, Y=3. Physical input is not remapped here.\n#pragma once\n#include <string.h>\n#include "DmFaceLayout.h"\nstatic inline dm_face_offset dm_nintendo_face_offset(const char *preset, unsigned button) {\n    // A right, B bottom, X top, Y left. UIKit positive Y points downward.\n    static const dm_face_offset nintendo[4] = {{1,0},{0,1},{0,-1},{-1,0}};\n    if (button >= 4) return (dm_face_offset){0,0};\n    int xbox = preset && !strcmp(preset, "xbox");\n    int ab = preset && !strcmp(preset, "ab");\n    if ((xbox || ab) && button < 2) button ^= 1u;\n    if (xbox && button >= 2) button ^= 1u;\n    return nintendo[button];\n}\n');f.write_text(s)
+          result={'test':'legacy-nintendo-v1','gamepad_sha256':expected['after'],'input_sha256':before_hash,'variant':expected['variant'],'integration_revision':'touch-chain-v2','geometry_sha256':hashlib.sha256(h.read_bytes()).hexdigest(),'scope':'Nintendo touch default and live preset geometry; native/physical mapping unchanged'}
+          (Path(os.environ['RUNNER_TEMP'])/'legacy-nintendo-source.json').write_text(json.dumps(result,indent=2)+'\n')
+          print('[legacy-nintendo-v1] visible and hit-test geometry share Nintendo default; physical input unchanged')
+          PY_LEGACY_NINTENDO
 
       - name: Explain experimental and game-dependent settings
         shell: bash
@@ -3810,7 +3813,13 @@ jobs:
           python - <<'PY_VERIFY_NINTENDO'
           import hashlib,json,os,plistlib,re,zipfile
           from pathlib import Path
-          expected={'dm/ios/Sources/DmGamepad.m':'b5e6bf86897aa24464cb3b51ddb193ca54a75a401097a834da7748922d434cdc','dm/ios/Sources/DmNintendoFace.h':'a5d3ee69c1dedab7191e9205af6822c3dcefe131f56cc1fb2b34a57b16dcb7bb','dm/ios/Sources/DmFaceLayout.h':'80becee7bd70ed897f4b9b26a631bb390d8052a406c84fc7559401f3b1cd7042'}
+          PAIRS={'3d69ff9c22013c6c425882285b759118cd0fbfc76801f31a672ad47150edee29': {'after': '6fa6665c65c009f16a1ffe465440a8ce78807e0e76c086c0ec92a308c6f84764', 'variant': 'main-build'}, 'f30be8be70452871355475408b1d9709da8c83c267c51d4f7e61ad29c9b8e45a': {'after': '8163ed82a3c900d7f575bdb14bb863951a9ae226abd40546ec6b3e4cf5835632', 'variant': 'main-nxnative-ipa-builder-controls-test'}, '9f15cd2bedfce73269d887336a462510903e68a620d844cf3abaee77740c2b36': {'after': 'f953a4411db1c55e2576a8ffd21d91b2f1ec1bfac92c0a86a44adf6c10e16801', 'variant': 'pocket-settings-test-build'}, '4aa816be9ce99f8744ec68323c7c2195f561fe74a30703a56e5b3f0f98c33fa9': {'after': 'f2e02dfdef5560fa1f331c9caccb80772628e2448b2fb6441d0d9a1b32ba62fd', 'variant': 'pocket-settings-test-nxnative-ipa-builder-controls-test'}}
+          root=Path(os.environ['RUNNER_TEMP'])
+          source=json.loads((root/'legacy-nintendo-source.json').read_text())
+          pair=PAIRS.get(source.get('input_sha256'))
+          if not pair or source.get('gamepad_sha256')!=pair['after'] or source.get('variant')!=pair['variant'] or source.get('integration_revision')!='touch-chain-v2':
+              raise SystemExit('Legacy Nintendo: source evidence is missing or mismatched')
+          expected={'dm/ios/Sources/DmGamepad.m':pair['after'],'dm/ios/Sources/DmNintendoFace.h':'a5d3ee69c1dedab7191e9205af6822c3dcefe131f56cc1fb2b34a57b16dcb7bb','dm/ios/Sources/DmFaceLayout.h':'80becee7bd70ed897f4b9b26a631bb390d8052a406c84fc7559401f3b1cd7042'}
           for name,digest in expected.items():
               if hashlib.sha256(Path(name).read_bytes()).hexdigest()!=digest: raise SystemExit('Legacy Nintendo source changed: '+name)
           root=Path(os.environ['RUNNER_TEMP'])
@@ -3822,7 +3831,7 @@ jobs:
               if info.get('DMCommit') not in ('b5ac83de5c3c','b5ac83de5c3c+dirty'): raise SystemExit('Legacy Nintendo: wrong engine stamp')
               b=z.read(infos[0].rsplit('/',1)[0]+'/'+name)
               if b'[legacy-nintendo-v1] Nintendo touch default' not in b: raise SystemExit('Legacy Nintendo: packaged marker missing')
-          result={'test':'legacy-nintendo-v1','source_hashes':expected,'executable_sha256':hashlib.sha256(b).hexdigest(),'scope':'Source and marker verification; on-device touch/physical input test still required'}
+          result={'test':'legacy-nintendo-v1','integration_revision':'touch-chain-v2','variant':pair['variant'],'source_hashes':expected,'executable_sha256':hashlib.sha256(b).hexdigest(),'scope':'Source and marker verification; on-device touch/physical input test still required'}
           (root/'legacy-nintendo-verification.json').write_text(json.dumps(result,indent=2)+'\n')
           print('[legacy-nintendo-v1] checked touch geometry source and packaged marker')
           PY_VERIFY_NINTENDO

@@ -1,4 +1,4 @@
-name: NxNative - Controls Editor Test - Disco + Nintendo TEST v1
+name: NxNative - Controls Editor Test
 
 on:
   workflow_dispatch:

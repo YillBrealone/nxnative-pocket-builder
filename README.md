@@ -1,33 +1,3 @@
-# Restore stable workflows — essentials only
-
-This package removes the LEGO diagnostic experiments by restoring the preserved stable workflows. It is NOT a LEGO compatibility fix and does not change engine pins.
-
-## For your current Pocket branch
-
-1. Open the `pocket-settings-test/` folder in this ZIP.
-2. Replace `.github/workflows/nxnative-ipa-builder-controls-test.yml` in your repository with its matching file. This removes the v1/v2/v3 LEGO diagnostic steps and their embedded patch code.
-3. The included `build.yml` is the unchanged stable regular build. Replace `.github/workflows/build.yml` only if you also want to restore that file.
-4. Commit the replacement. On your next build, start a **new run**; re-running an old job uses the old diagnostic workflow revision.
-
-For the Main branch, use `main/` instead. These are alternatives for two branches, not four workflows to install into one branch. Each branch has only its existing regular build and combined Controls Editor Test.
-
-## Preserved
-
-- Default, Standard and Legacy engine choices, with their existing pins and defaults.
-- Existing Downwell and A Short Hike fixes, Controls Editor, input modes and nested settings.
-- Base/update/DLC handling, direct IPA delivery, secrets handling, dependency/cache safeguards and retention behavior.
-- Handheld and British-English defaults; no new compatibility list or experimental engine updates.
-
-## Removed from this delivery
-
-No LEGO clear experiment, GPU diagnostic patch, shader-validation injection, diagnostic-only title/cache guards, browser inspector, investigation logs, test fixture sources or experimental ZIPs. General build logging and integrity checks remain because they belong to the stable workflow.
-
-Only seven files are included: four branch-specific YAML alternatives, this README, TROUBLESHOOTING.md and the engine license.
-
-These files are prepared locally; the assistant has not committed them to your remote repository. Your existing installed IPA will not change just because a YAML file is restored. A future normal build/install replaces that app's diagnostic code. No save, DLC or key deletion is needed, and no immediate LEGO retest is requested.
-
----
-
 # Full builder guide
 
 # NxNative Pocket Builder

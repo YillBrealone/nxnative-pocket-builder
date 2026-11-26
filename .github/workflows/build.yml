@@ -166,6 +166,146 @@ jobs:
           done
           rm -rf engine
 
+      - name: Apply fs ReadFile EFAULT retry fix
+        # LEGO Marvel Super Heroes spends all 8 retries of the engine's fs ReadFile EFAULT loop
+        # without reading a byte (logged as "prepared again at +0", then "failed at +0 (EFAULT)"),
+        # the SDK reports an fs error and the guest crashes (main+0x270dd8 on A12Z, main+0x271850
+        # on A19 Pro). This raises the budget, counts only stalled retries, and stays idempotent.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f dm/host/hle_fs.c ]]; then
+            echo "::warning::No dm/host/hle_fs.c at this engine revision - this build does NOT carry the fs ReadFile retry fix."
+            exit 0
+          fi
+          grep -q "reprep++ < 512" dm/host/hle_fs.c && { echo "fs ReadFile retry fix already applied"; exit 0; }
+          python3 - dm/host/hle_fs.c <<'PYTHON'
+          #!/usr/bin/env python3
+          """Make fs ReadFile survive pages the graphics layer re-protects mid-read.
+
+          dm/host/hle_fs.c reads into guest buffers with pread(). A destination page that
+          the graphics layer (dm/gfx/nvn/nvn_dirty.c) write-protected after an upload makes
+          pread() fail with EFAULT. The engine prepares the span and retries, but the
+          budget is a flat 8 and nothing changes between attempts:
+
+              if (errno == EFAULT && reprep++ < 8) {
+
+          LEGO Marvel Super Heroes (01006F600FFC8000) spends all 8 without reading a byte
+          ("prepared again at +0", then "failed at +0 (EFAULT)"), the SDK sees an fs error
+          and the guest crashes -- main+0x270dd8 on an A12Z iPad, main+0x271850 on an
+          A19 Pro iPhone.
+
+          This script rewrites that retry so it converges:
+
+            * budget 8 -> 512, because this is a race with uploads, not a permanent fault;
+            * the budget only counts retries that made NO progress, so a long read that is
+              re-protected repeatedly still finishes;
+            * the give-up path says how many retries were spent.
+
+          The failure path is untouched: a destination that is genuinely not writable still
+          logs [RED] and returns an error exactly as before.
+
+          It is idempotent and verifies its own work: running it twice changes nothing the
+          second time, and if the expected code is missing (a different engine revision) it
+          exits non-zero instead of silently building an unpatched engine.
+
+          Usage: python3 hle_fs_readfile_retry.py dm/host/hle_fs.c
+          """
+          from __future__ import annotations
+
+          import re
+          import sys
+          from pathlib import Path
+
+          MARK = "reprep_at"          # proves the patch is in
+          BUDGET = 512
+
+          DECL_RE = re.compile(
+              r"^(?P<indent>[ \t]*)(?P<decl>[^\n]*\bint reprep = 0\b[^\n]*)$", re.M)
+          RETRY_RE = re.compile(
+              r"if \(errno == EFAULT && reprep\+\+ < (?P<n>\d+)\) \{\s*\n")
+
+          DECL_ADDED = "long reprep_at = -1;   /* stall budget: set by the fs ReadFile EFAULT retry fix */"
+
+          RETRY_BLOCK = """if (errno == EFAULT) {   /* fs ReadFile EFAULT retry fix: the graphics layer re-protects pages after each upload, so this retries until
+                                                   the read stops advancing, not a flat 8 times. LEGO Marvel Super Heroes spent all 8 with got still 0 and the guest crashed */
+                          if ((long)got != reprep_at) { reprep = 0; reprep_at = (long)got; }   /* this read advanced: the budget is for stalls, not for the span's length */
+                          if (reprep++ < %d) {
+                              dm_guest_write_prepare((uint8_t *)buf + got, sz - got); continue; }
+                          LOG("[RED] fs ReadFile into %%p+%%#zx: gave up after %%d EFAULT retries at +%%#zx, the destination stays read-only", buf, sz, reprep, got); }
+                      """ % BUDGET
+
+
+          def transform(text: str) -> tuple[str, list[str]]:
+              notes: list[str] = []
+              if MARK in text:
+                  return text, ["already patched (idempotent, nothing to do)"]
+
+              m = DECL_RE.search(text)
+              if not m:
+                  raise SystemExit(
+                      "hle_fs_readfile_retry: no 'int reprep = 0' declaration in h_fs_ReadFile.\n"
+                      "This engine revision differs from the one this fix was written against.\n"
+                      "Refusing to produce an unpatched build.")
+              if "reprep_at" not in m.group("decl"):
+                  text = text[:m.end()] + "\n" + m.group("indent") + DECL_ADDED + text[m.end():]
+                  notes.append("declared reprep_at next to reprep")
+
+              m2 = RETRY_RE.search(text)
+              if not m2:
+                  if "errno == EFAULT" in text:
+                      raise SystemExit(
+                          "hle_fs_readfile_retry: found the EFAULT handling but not the "
+                          "'errno == EFAULT && reprep++ < N' retry line this fix rewrites.\n"
+                          "Refusing to produce an unpatched build.")
+                  raise SystemExit(
+                      "hle_fs_readfile_retry: no EFAULT retry in h_fs_ReadFile at all.\n"
+                      "Refusing to produce an unpatched build.")
+              old_budget = m2.group("n")
+              text = text[:m2.start()] + RETRY_BLOCK + text[m2.end():]
+              notes.append("retry budget %s -> %d, stalls only, give-up line added" % (old_budget, BUDGET))
+              return text, notes
+
+
+          def main(argv: list[str]) -> int:
+              args = [a for a in argv[1:] if not a.startswith("--")]
+              skip_if_absent = "--skip-if-absent" in argv
+              strict = "--strict" in argv
+              if len(args) != 1:
+                  print(__doc__)
+                  return 2
+              path = Path(args[0])
+              if not path.is_file():
+                  msg = ("hle_fs_readfile_retry: %s does not exist. On the NX2Apple engine the "
+                         "source appears only after tools/engine.py sync, so this step must run "
+                         "after that." % path)
+                  if skip_if_absent:
+                      # A different engine layout must not break a build that works today, but
+                      # the log has to say so plainly: an unpatched IPA is not a fixed IPA.
+                      print("hle_fs_readfile_retry: SKIPPED - no dm/host/hle_fs.c at this engine "
+                            "revision, so this build does NOT carry the fs ReadFile retry fix")
+                      return 0
+                  raise SystemExit(msg)
+              original = path.read_text()
+              patched, notes = transform(original)
+              if patched == original:
+                  for n in notes:
+                      print("  %s" % n)
+                  print("hle_fs_readfile_retry: %s already carries the fix" % path)
+                  return 0
+              path.write_text(patched)
+              for n in notes:
+                  print("  %s" % n)
+              print("hle_fs_readfile_retry: patched %s" % path)
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main(sys.argv))
+          PYTHON
+          grep -q "reprep_at" dm/host/hle_fs.c
+          echo "fs ReadFile retry fix applied and verified (reprep_at present)"
+
       - name: Record engine revision and runner tools
         shell: bash
         run: |

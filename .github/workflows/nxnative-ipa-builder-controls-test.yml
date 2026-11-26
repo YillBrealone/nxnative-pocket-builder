@@ -3537,9 +3537,9 @@ jobs:
               exit 1
             fi
             GPU_DIAG_ENV="$RUNNER_TEMP/nxnative-a12z-gpu-diagnostic.env"
-            printf 'DM_NVN_CUT=0\n' > "$GPU_DIAG_ENV"
+            printf 'DM_NVN_CUT=0\nDM_NVN_PASSDUMP=every:300\n' > "$GPU_DIAG_ENV"
             BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
-            echo "A12Z graphics test: disabled segmented GPU submissions (DM_NVN_CUT=0)."
+            echo "A12Z graphics diagnostics: DM_NVN_CUT=0; pass/binding dump every 300 frames."
           fi
           if [[ "$DEVICE_INPUT" == *"BC fallback"* ]]; then
             export DM_IOS_RENDERER=legacy
@@ -3842,9 +3842,9 @@ jobs:
               exit 1
             fi
             GPU_DIAG_ENV="$RUNNER_TEMP/nxnative-a12z-gpu-diagnostic.env"
-            printf 'DM_NVN_CUT=0\n' > "$GPU_DIAG_ENV"
+            printf 'DM_NVN_CUT=0\nDM_NVN_PASSDUMP=every:300\n' > "$GPU_DIAG_ENV"
             BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
-            echo "A12Z graphics test: disabled segmented GPU submissions (DM_NVN_CUT=0)."
+            echo "A12Z graphics diagnostics: DM_NVN_CUT=0; pass/binding dump every 300 frames."
           fi
           if [[ "$DEVICE_INPUT" == *"BC fallback"* ]]; then
             export DM_IOS_RENDERER=legacy

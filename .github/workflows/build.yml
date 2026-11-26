@@ -3821,6 +3821,17 @@ jobs:
           fi
 
           # Device-specific renderer & pipeline archive settings
+          # A12Z GPU fault isolation: the last run faulted in a segmented command buffer.
+          if [[ "$DEVICE_INPUT" == *"A12Z"* ]]; then
+            if ! grep -q -- "--env-file" <<< "$HELP_TEXT"; then
+              echo "::error::A12Z graphics diagnostic requires this engine to support --env-file."
+              exit 1
+            fi
+            GPU_DIAG_ENV="$RUNNER_TEMP/nxnative-a12z-gpu-diagnostic.env"
+            printf 'DM_NVN_CUT=0\n' > "$GPU_DIAG_ENV"
+            BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
+            echo "A12Z graphics test: disabled segmented GPU submissions (DM_NVN_CUT=0)."
+          fi
           if [[ "$DEVICE_INPUT" == *"BC fallback"* ]]; then
             export DM_IOS_RENDERER=legacy
             export DM_LEGACY_TARGET=m2
@@ -4115,6 +4126,17 @@ jobs:
           fi
 
           # Device-specific renderer & pipeline archive settings
+          # A12Z GPU fault isolation: the last run faulted in a segmented command buffer.
+          if [[ "$DEVICE_INPUT" == *"A12Z"* ]]; then
+            if ! grep -q -- "--env-file" <<< "$HELP_TEXT"; then
+              echo "::error::A12Z graphics diagnostic requires this engine to support --env-file."
+              exit 1
+            fi
+            GPU_DIAG_ENV="$RUNNER_TEMP/nxnative-a12z-gpu-diagnostic.env"
+            printf 'DM_NVN_CUT=0\n' > "$GPU_DIAG_ENV"
+            BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
+            echo "A12Z graphics test: disabled segmented GPU submissions (DM_NVN_CUT=0)."
+          fi
           if [[ "$DEVICE_INPUT" == *"BC fallback"* ]]; then
             export DM_IOS_RENDERER=legacy
             export DM_LEGACY_TARGET=m2

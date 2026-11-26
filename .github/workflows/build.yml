@@ -864,8 +864,9 @@ jobs:
                   fi
                 elif [[ "$kind" == "direct" ]]; then
                   mkdir -p "$output"
-                  if ! (cd "$output" && curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -C - -O -J "$target_id") >"$download_log" 2>&1; then
-                    echo "::error::Direct download failed. Check the link, file access and expiry."
+                  if ! (cd "$output" && curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -O -J "$target_id") >"$download_log" 2>&1; then
+                    cat "$download_log" >&2
+                  echo "::error::Direct download failed. Check the link, file access and expiry."
                     exit 1
                   fi
                   if [[ -z "$(ls -A "$output" 2>/dev/null)" ]]; then

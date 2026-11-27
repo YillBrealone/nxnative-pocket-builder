@@ -262,7 +262,13 @@ jobs:
                       "hle_fs_readfile_retry: no EFAULT retry in h_fs_ReadFile at all.\n"
                       "Refusing to produce an unpatched build.")
               old_budget = m2.group("n")
-              text = text[:m2.start()] + RETRY_BLOCK + text[m2.end():]
+              # Replace the entire original retry branch through its `continue; }` terminator.
+              # Replacing only the opening `if` duplicated the old body and broke C scope.
+              try:
+                  end = text.index("continue; }", m2.end()) + len("continue; }")
+              except ValueError:
+                  raise SystemExit("hle_fs_readfile_retry: retry block terminator missing; refusing to edit.")
+              text = text[:m2.start()] + RETRY_BLOCK + text[end:]
               notes.append("retry budget %s -> %d, stalls only, give-up line added" % (old_budget, BUDGET))
               return text, notes
 

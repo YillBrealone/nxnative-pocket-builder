@@ -232,7 +232,9 @@ jobs:
                           if ((long)got != reprep_at) { reprep = 0; reprep_at = (long)got; }   /* this read advanced: the budget is for stalls, not for the span's length */
                           if (reprep++ < %d) {
                               dm_guest_write_prepare((uint8_t *)buf + got, sz - got); continue; }
-                          LOG("[RED] fs ReadFile into %%p+%%#zx: gave up after %%d EFAULT retries at +%%#zx, the destination stays read-only", buf, sz, reprep, got); }
+                          const char *trace_path = fd >= 0 && fd < 4096 && g_fdpath[fd] ? g_fdpath[fd] : "(unknown)";
+                          LOG("[RED] fs ReadFile EFAULT path=%%s handle=%%#llx fd=%%d image=%%d off=%%lld image_off=%%#llx buf=%%p len=%%#zx got=%%#zx retries=%%d",
+                              trace_path, (unsigned long long)h, fd, image, (long long)off, (unsigned long long)read_offset, buf, sz, got, reprep); }
                       """ % BUDGET
 
 

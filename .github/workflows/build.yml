@@ -3509,6 +3509,37 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stage LEGO update main module for callsite diagnosis (survey-only)
+        if: success() && inputs.build_mode == 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/GameFiles/01006F600FFC8000_survey"
+          src="$root/extract/ExeFS/main"
+          if [[ ! -s "$src" ]]; then
+            src="$(find "$root" -type f -path '*/ExeFS/main' -print -quit 2>/dev/null || true)"
+          fi
+          if [[ -z "$src" || ! -s "$src" ]]; then
+            echo "::error::Survey did not leave LEGO ExeFS/main under $root"
+            find "$RUNNER_TEMP/GameFiles" -type f -path '*/ExeFS/main' -print | head -20 || true
+            exit 1
+          fi
+          echo "Staging LEGO main module from $src"
+          out="$RUNNER_TEMP/lego-callsite-diagnostic"
+          mkdir -p "$out"
+          cp "$src" "$out/main"
+          printf 'title_id=01006F600FFC8000\nupdate_id=01006F600FFC8800\nupdate_version=65536\n' > "$out/identity.txt"
+          shasum -a 256 "$out/main" | tee "$out/SHA256SUMS"
+
+      - name: Upload LEGO callsite diagnostic
+        if: success() && inputs.build_mode == 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lego-callsite-diagnostic-${{ github.run_number }}
+          path: ${{ runner.temp }}/lego-callsite-diagnostic/
+          if-no-files-found: error
+          retention-days: 2
+
       - name: Update shader toolchain lock and header
         if: inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)'
         env:
@@ -4584,33 +4615,6 @@ jobs:
                       # If deletion fails, a previously confirmed folder expiry still applies.
                       print('::warning::GoFile cleanup could not be confirmed; any created folder may remain until its expiry.')
           PYTHON
-
-      - name: Stage LEGO v65536 main module for callsite diagnosis
-        if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000'
-        shell: bash
-        run: |
-          set -euo pipefail
-          src="$RUNNER_TEMP/GameFiles/01006F600FFC8000_build/extract/v65536.partial/ExeFS/main"
-          if [[ ! -s "$src" ]]; then
-            echo "::error::Expected LEGO update main module not found at $src"
-            find "$RUNNER_TEMP/GameFiles" -type f -path '*/01006F600FFC8000_build/extract/*/ExeFS/main' -print | head -20 || true
-            exit 1
-          fi
-          out="$RUNNER_TEMP/lego-callsite-diagnostic"
-          mkdir -p "$out"
-          cp "$src" "$out/main"
-          printf 'title_id=01006F600FFC8000\nupdate_id=01006F600FFC8800\nupdate_version=65536\n' > "$out/identity.txt"
-          shasum -a 256 "$out/main" | tee "$out/SHA256SUMS"
-          echo "Staged user-provided LEGO main module for private callsite analysis; not published outside this workflow artifact."
-
-      - name: Upload LEGO callsite diagnostic
-        if: success() && inputs.build_mode != 'Survey Only (Fast 2-min compatibility check)' && env.DETECTED_TITLE_ID == '01006F600FFC8000'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: lego-callsite-diagnostic-${{ github.run_number }}
-          path: ${{ runner.temp }}/lego-callsite-diagnostic/
-          if-no-files-found: error
-          retention-days: 2
 
       - name: Upload IPA
         id: ipa_artifact

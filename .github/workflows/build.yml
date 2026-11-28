@@ -4452,10 +4452,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: Disco-Nintendo-Integration-Evidence
+          name: Nintendo-Integration-Evidence
           path: |
-            ${{ runner.temp }}/combined-disco-source.json
-            ${{ runner.temp }}/combined-disco-verification.json
             ${{ runner.temp }}/legacy-nintendo-source.json
             ${{ runner.temp }}/legacy-nintendo-verification.json
             ${{ runner.temp }}/legacy-layout-source.json

@@ -166,44 +166,26 @@ jobs:
           done
           rm -rf engine
 
-      - name: Apply fs ReadFile EFAULT retry fix
+      - name: Add fs ReadFile path diagnostics (bounded retries)
         # LEGO Marvel Super Heroes spends all 8 retries of the engine's fs ReadFile EFAULT loop
         # without reading a byte (logged as "prepared again at +0", then "failed at +0 (EFAULT)"),
         # the SDK reports an fs error and the guest crashes (main+0x270dd8 on A12Z, main+0x271850
-        # on A19 Pro). This raises the budget, counts only stalled retries, and stays idempotent.
+        # on A19 Pro). This keeps the retry budget at 8 and adds the fd-to-path association needed to diagnose the invalid guest pointer. It does not zero-fill or write to invalid memory.
         shell: bash
         run: |
           set -euo pipefail
           if [[ ! -f dm/host/hle_fs.c ]]; then
-            echo "::warning::No dm/host/hle_fs.c at this engine revision - this build does NOT carry the fs ReadFile retry fix."
+            echo "::warning::No dm/host/hle_fs.c at this engine revision - this build does NOT carry the fs ReadFile diagnostic."
             exit 0
           fi
-          grep -q "reprep++ < 512" dm/host/hle_fs.c && { echo "fs ReadFile retry fix already applied"; exit 0; }
+          grep -q "reprep++ < 512" dm/host/hle_fs.c && { echo "::error::Unexpected 512-retry patch in source; refusing this diagnostic build."; exit 1; }
           python3 - dm/host/hle_fs.c <<'PYTHON'
           #!/usr/bin/env python3
-          """Make fs ReadFile survive pages the graphics layer re-protects mid-read.
+          """Instrument the failing fs ReadFile without masking it.
 
-          dm/host/hle_fs.c reads into guest buffers with pread(). A destination page that
-          the graphics layer (dm/gfx/nvn/nvn_dirty.c) write-protected after an upload makes
-          pread() fail with EFAULT. The engine prepares the span and retries, but the
-          budget is a flat 8 and nothing changes between attempts:
-
-              if (errno == EFAULT && reprep++ < 8) {
-
-          LEGO Marvel Super Heroes (01006F600FFC8000) spends all 8 without reading a byte
-          ("prepared again at +0", then "failed at +0 (EFAULT)"), the SDK sees an fs error
-          and the guest crashes -- main+0x270dd8 on an A12Z iPad, main+0x271850 on an
-          A19 Pro iPhone.
-
-          This script rewrites that retry so it converges:
-
-            * budget 8 -> 512, because this is a race with uploads, not a permanent fault;
-            * the budget only counts retries that made NO progress, so a long read that is
-              re-protected repeatedly still finishes;
-            * the give-up path says how many retries were spent.
-
-          The failure path is untouched: a destination that is genuinely not writable still
-          logs [RED] and returns an error exactly as before.
+          Retain the engine's bounded 8-retry behavior, log safe scalar read context on
+          exhaustion, and associate ordinary opened file descriptors with their guest paths
+          even when DM_FSLOG is off. Never dereference or write to the invalid destination.
 
           It is idempotent and verifies its own work: running it twice changes nothing the
           second time, and if the expected code is missing (a different engine revision) it
@@ -218,7 +200,7 @@ jobs:
           from pathlib import Path
 
           MARK = "reprep_at"          # proves the patch is in
-          BUDGET = 512
+          BUDGET = 8
 
           DECL_RE = re.compile(
               r"^(?P<indent>[ \t]*)(?P<decl>[^\n]*\bint reprep = 0\b[^\n]*)$", re.M)
@@ -227,9 +209,8 @@ jobs:
 
           DECL_ADDED = "long reprep_at = -1;   /* stall budget: set by the fs ReadFile EFAULT retry fix */"
 
-          RETRY_BLOCK = """if (errno == EFAULT) {   /* fs ReadFile EFAULT retry fix: the graphics layer re-protects pages after each upload, so this retries until
-                                                   the read stops advancing, not a flat 8 times. LEGO Marvel Super Heroes spent all 8 with got still 0 and the guest crashed */
-                          if ((long)got != reprep_at) { reprep = 0; reprep_at = (long)got; }   /* this read advanced: the budget is for stalls, not for the span's length */
+          RETRY_BLOCK = """if (errno == EFAULT) {   /* diagnostic only: retain the engine's bounded retry count */
+                          if ((long)got != reprep_at) { reprep = 0; reprep_at = (long)got; }
                           if (reprep++ < %d) {
                               dm_guest_write_prepare((uint8_t *)buf + got, sz - got); continue; }
                           const char *trace_path = fd >= 0 && fd < 4096 && g_fdpath[fd] ? g_fdpath[fd] : "(unknown)";
@@ -291,7 +272,7 @@ jobs:
                       # A different engine layout must not break a build that works today, but
                       # the log has to say so plainly: an unpatched IPA is not a fixed IPA.
                       print("hle_fs_readfile_retry: SKIPPED - no dm/host/hle_fs.c at this engine "
-                            "revision, so this build does NOT carry the fs ReadFile retry fix")
+                            "revision, so this build does NOT carry the fs ReadFile diagnostic")
                       return 0
                   raise SystemExit(msg)
               original = path.read_text()
@@ -311,12 +292,24 @@ jobs:
           if __name__ == "__main__":
               raise SystemExit(main(sys.argv))
           PYTHON
+          # Keep the opened guest path available even when DM_FSLOG is disabled.
+          python3 - <<'PYTRACE'
+          from pathlib import Path
+          p = Path("dm/host/hle_fs.c")
+          s = p.read_text()
+          old = "if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }"
+          new = "if (fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }"
+          if old in s:
+              p.write_text(s.replace(old, new, 1))
+          elif new not in s:
+              raise SystemExit("expected file-open path tracking site not found")
+          PYTRACE
           grep -q "reprep_at" dm/host/hle_fs.c
           if grep -Fq "returning the span zero-filled" dm/host/hle_fs.c || grep -Fq "memset((uint8_t *)buf + got" dm/host/hle_fs.c; then
             echo "::error::Unsafe EFAULT zero-fill fallback detected; refusing to build an IPA that writes to an invalid guest pointer."
             exit 1
           fi
-          echo "fs ReadFile retry fix applied and verified (reprep_at present)"
+          echo "fs ReadFile diagnostic applied and verified (original bounded retry count retained)"
 
       - name: Record engine revision and runner tools
         shell: bash

@@ -3797,9 +3797,9 @@ jobs:
                 exit 1
               fi
               GPU_DIAG_ENV="$RUNNER_TEMP/lego-a12z-gpu-diagnostic.env"
-              printf 'DM_NVN_CUT=0\nDM_NVN_PASSDUMP=every:300\n' > "$GPU_DIAG_ENV"
+              printf 'DM_NVN_CUT=0\nDM_NVN_PASSDUMP=1140-1200\n' > "$GPU_DIAG_ENV"
               BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
-              echo "LEGO A12Z diagnostic: DM_NVN_CUT=0; sampled render-pass/resource diagnostics enabled (DM_NVN_PASSDUMP=every:300). Verify both settings in startup/pass logs."
+              echo "LEGO A12Z diagnostic: DM_NVN_CUT=0; targeted render-pass/resource diagnostics enabled for frames 1140-1200. Verify both settings in startup/pass logs."
             fi
             export DM_IOS_RENDERER=legacy
             export DM_LEGACY_TARGET=m2
@@ -4102,9 +4102,9 @@ jobs:
                 exit 1
               fi
               GPU_DIAG_ENV="$RUNNER_TEMP/lego-a12z-gpu-diagnostic.env"
-              printf 'DM_NVN_CUT=0\nDM_NVN_PASSDUMP=every:300\n' > "$GPU_DIAG_ENV"
+              printf 'DM_NVN_CUT=0\nDM_NVN_PASSDUMP=1140-1200\n' > "$GPU_DIAG_ENV"
               BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
-              echo "LEGO A12Z diagnostic: DM_NVN_CUT=0; sampled render-pass/resource diagnostics enabled (DM_NVN_PASSDUMP=every:300). Verify both settings in startup/pass logs."
+              echo "LEGO A12Z diagnostic: DM_NVN_CUT=0; targeted render-pass/resource diagnostics enabled for frames 1140-1200. Verify both settings in startup/pass logs."
             fi
             export DM_IOS_RENDERER=legacy
             export DM_LEGACY_TARGET=m2

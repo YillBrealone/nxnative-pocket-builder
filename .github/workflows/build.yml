@@ -3790,6 +3790,17 @@ jobs:
 
           # Device-specific renderer & pipeline archive settings
           if [[ "$DEVICE_INPUT" == *"BC fallback"* ]]; then
+            # LEGO Marvel A12Z GPU isolation: test whether between-pass segmented submits trigger the Metal page fault.
+            if [[ "$DETECTED_TITLE_ID" == "01006F600FFC8000" ]]; then
+              if ! grep -q -- "--env-file" <<< "$HELP_TEXT"; then
+                echo "::error::LEGO A12Z GPU diagnostic requires this engine to support --env-file."
+                exit 1
+              fi
+              GPU_DIAG_ENV="$RUNNER_TEMP/lego-a12z-gpu-diagnostic.env"
+              printf 'DM_NVN_CUT=0\n' > "$GPU_DIAG_ENV"
+              BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
+              echo "LEGO A12Z diagnostic: DM_NVN_CUT=0 (segmented submissions disabled); verify startup log before interpreting results."
+            fi
             export DM_IOS_RENDERER=legacy
             export DM_LEGACY_TARGET=m2
             if grep -q -- "--gpu" <<<"$HELP_TEXT"; then
@@ -4084,6 +4095,17 @@ jobs:
 
           # Device-specific renderer & pipeline archive settings
           if [[ "$DEVICE_INPUT" == *"BC fallback"* ]]; then
+            # LEGO Marvel A12Z GPU isolation: test whether between-pass segmented submits trigger the Metal page fault.
+            if [[ "$DETECTED_TITLE_ID" == "01006F600FFC8000" ]]; then
+              if ! grep -q -- "--env-file" <<< "$HELP_TEXT"; then
+                echo "::error::LEGO A12Z GPU diagnostic requires this engine to support --env-file."
+                exit 1
+              fi
+              GPU_DIAG_ENV="$RUNNER_TEMP/lego-a12z-gpu-diagnostic.env"
+              printf 'DM_NVN_CUT=0\n' > "$GPU_DIAG_ENV"
+              BUILD_ARGS+=(--env-file "$GPU_DIAG_ENV")
+              echo "LEGO A12Z diagnostic: DM_NVN_CUT=0 (segmented submissions disabled); verify startup log before interpreting results."
+            fi
             export DM_IOS_RENDERER=legacy
             export DM_LEGACY_TARGET=m2
             if grep -q -- "--gpu" <<<"$HELP_TEXT"; then
